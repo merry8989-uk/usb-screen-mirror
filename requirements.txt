@@ -1,0 +1,11 @@
+# PhoneMirror - runtime dependencies
+#
+# Koi third-party runtime dependency nahi chahiye.
+# App sirf Python standard library (tkinter, subprocess, threading) use karta hai.
+#
+# Zaroori external tools (Python package nahi, system par install karo):
+#   scrcpy  ->  winget install Genymobile.scrcpy
+#   adb     ->  scrcpy ke saath aata hai (platform-tools)
+#
+# Sirf .exe build karne ke liye:
+#   pip install pyinstaller
