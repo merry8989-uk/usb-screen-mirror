@@ -70,8 +70,8 @@ class MainActivity : Activity() {
             w = (w * s).toInt()
             h = (h * s).toInt()
         }
-        width = w and 0xFFFFFFFE   // even
-        height = h and 0xFFFFFFFE
+        width = w and -2   // last bit clear -> even (0xFFFFFFFE Int me fit nahi hota)
+        height = h and -2
 
         val layout = LinearLayout(this)
         layout.orientation = LinearLayout.VERTICAL
