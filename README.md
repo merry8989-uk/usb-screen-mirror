@@ -1,5 +1,11 @@
 # PhoneMirror
 
+> [!WARNING]
+> **🚧 `PhoneMirrorServer.apk` (Mode B) filhaal download ya use na karein.**
+> Yeh ek **experimental prototype** hai aur kisi asli device par test nahi hua.
+> Sirf experiment/seekhne ke liye rakha gaya hai.
+> Screen mirroring ke liye **Mode A** (`PhoneMirror.py` / `PhoneMirror.exe`) use karein.
+
 Android screen mirroring tools for Windows. Is repo me **do tarike** hain:
 
 | | **Mode A — scrcpy wrapper** | **Mode B — Standalone** |
@@ -12,9 +18,9 @@ Android screen mirroring tools for Windows. Is repo me **do tarike** hain:
 | Multi-device | Haan | Nahi |
 | Recording | Haan (mp4) | Nahi |
 | Camera mirroring | Haan (scrcpy 2.2+) | Nahi |
-| Status | Production-quality | **Prototype** |
+| Status | Production-quality | **Prototype — filhaal use na karein** |
 
-**Zyadatar logon ke liye Mode A better hai.** Mode B seekhne/experiment ke liye.
+**Zyadatar logon ke liye Mode A better hai.** Mode B abhi experimental hai.
 
 ---
 
@@ -47,28 +53,23 @@ Phone par kuch install nahi hota.
 
 ## Multi-device
 
-- **Device** list me ek se zyada phone chuno: **Ctrl + click** (ek-ek jodne ke liye)
-  ya **Shift + click** (range ke liye).
+- **Device** list me ek se zyada phone chuno: **Ctrl + click** ya **Shift + click**.
 - **Start Mirroring** dabao — har device ke liye alag scrcpy window khulti hai.
-- Har device ka apna **auto-reconnect** chalta hai; log me har line `[serial]` prefix
-  ke saath aati hai.
+- Har device ka apna **auto-reconnect**; log me har line `[serial]` prefix ke saath.
 - **Stop All** sab sessions band kar deta hai.
-- Wi-Fi helpers (Enable/Connect/detect IP) primary (pehle chune gaye) device par chalte hain.
 
 ## Screen recording
 
 - **7. Recording** me "Record session to file" on karo.
 - "Save as..." se path chuno, ya khali chhodo — phir `~/Videos` me
   `PhoneMirror_<serial>_<timestamp>.mp4` ban jaati hai.
-- Multi-device par file naam me serial khud jud jaata hai (jaise `sess_A.mp4`, `sess_B.mp4`).
-- Format extension se decide hota hai (`.mp4` ya `.mkv`).
+- Multi-device par file naam me serial khud jud jaata hai.
 
 ## Camera mirroring
 
 - **5. Video** → Source: **Camera** chuno (scrcpy 2.2+ chahiye).
-- Facing: `back` / `front` / `external`; Camera size: `1920x1080` / `1280x720` / etc.
-- Camera FPS alag se set hota hai.
-- Camera mode me `Max size` slider disable ho jaata hai (uski jagah `--camera-size` lagta hai).
+- Facing: `back` / `front` / `external`; size aur fps alag se.
+- Camera mode me `Max size` slider disable ho jaata hai (`--camera-size` lagta hai).
 
 ## USB vs Wi-Fi
 
@@ -91,36 +92,36 @@ Mouse = touch, keyboard = typing (scrcpy me default on). App se:
 
 ## Auto-reconnect (per device)
 
-Disconnect hone par (cable hila, phone drop) app khud `adb` se check karke us device
-ka scrcpy dobara launch kar deta hai. Retry delay aur max attempts tunable.
+Disconnect hone par app khud `adb` se check karke us device ka scrcpy dobara
+launch kar deta hai. Retry delay aur max attempts tunable.
 
 ---
 
 # Mode B — Standalone (APK + receiver)
 
+> [!WARNING]
+> **🚧 Filhaal download ya use na karein.**
+> Yeh ek **experimental prototype** hai jo kisi asli device par test nahi hua.
+> Iska APK (`PhoneMirrorServer.apk`) sirf development/experiment ke liye hai.
+> Screen mirroring ke liye **Mode A** use karein.
+
 Apna engine: phone screen capture karta hai aur PC ko stream bhejta hai.
+Yeh scrcpy se alag, ghar-ka-bana engine hai — sirf video, ek client, aur app
+foreground me rehni chahiye.
 
-> **Prototype:** sirf video, ek client, app foreground me rehni chahiye. Audio abhi nahi.
+## (Reference) APK + receiver kaise chalega
 
-## APK install karo (phone)
+1. `PhoneMirrorServer.apk` phone par install → app kholo → **Start server** → capture permission.
+2. App jo IP dikhaye, wo PC par `PhoneMirrorReceiver.py` me daalo (port 27183) → **Connect & Play**.
+3. ffmpeg chahiye PC par: `winget install Gyan.FFmpeg`.
 
-1. Release se `PhoneMirrorServer.apk` download karo → install karo.
-2. App kholo → **Start server** → screen capture permission do.
-3. App jo **IP** aur port (**27183**) dikhaye, wo note karo.
-
-## PC receiver chalao
-
-1. ffmpeg install karo: `winget install Gyan.FFmpeg`
-2. `python PhoneMirrorReceiver.py`
-3. Phone ka IP daalo (port 27183) → **Connect & Play**.
-
-Phone aur PC same Wi-Fi par hone chahiye. Windows Firewall pehli baar pooch sakta hai.
+Phone aur PC same Wi-Fi par hone chahiye.
 
 ## Andar se kaise kaam karta hai
 
 1. **Capture** — `MediaProjection` + `VirtualDisplay` → Surface.
 2. **Encode** — `MediaCodec` hardware H.264, 8 Mbps, 30 fps, max 1280px.
-3. **Bitstream** — AVCC → Annex-B convert (ffplay raw H.264 Annex-B maangta hai).
+3. **Bitstream** — AVCC → Annex-B convert.
 4. **Transport** — TCP port 27183.
 5. **Decode** — PC par ffplay.
 
@@ -145,17 +146,15 @@ cd android && gradle assembleDebug
 - "unauthorized" device — phone par "Allow" accept karo, ya `adb kill-server`.
 - Wi-Fi connect nahi — same Wi-Fi? `adb tcpip 5555` chalaya? firewall port 5555?
 - Camera nahi chala — scrcpy 2.2+ chahiye (`scrcpy --version`).
-- Recording file nahi bani — folder ka path valid hai? disk space hai?
-- Multi-device me ek window nahi khuli — us device ka serial galat/stale? Refresh karo.
+- Multi-device me ek window nahi khuli — Refresh karo.
 
-**Mode B**
+**Mode B** (filhaal use na karein — sirf reference)
 - Receiver connect nahi — same Wi-Fi? app chalu? firewall port 27183?
 - ffplay window nahi khulti — ffmpeg install hai? `ffplay -version`.
-- Stream ruk jaata hai — phone par app foreground me rakho.
 
 ---
 
 ## Aage kya
 
-Mode A: clipboard sync, settings save/load, audio-only mode.
-Mode B: audio (AudioPlaybackCapture + Opus), foreground service, input reverse channel.
+Mode A: clipboard sync, settings save/load.
+Mode B: pehle device par test, phir audio (AudioPlaybackCapture + Opus).
