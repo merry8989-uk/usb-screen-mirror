@@ -9,18 +9,19 @@ Android screen mirroring tools for Windows. Is repo me **do tarike** hain:
 | Engine | scrcpy (proven, polished) | Apna (MediaProjection + MediaCodec) |
 | Transport | USB (best) ya Wi-Fi | Wi-Fi / TCP |
 | Audio | Haan (clear, Opus) | Nahi (abhi sirf video) |
+| Multi-device | Haan | Nahi |
+| Recording | Haan (mp4) | Nahi |
+| Camera mirroring | Haan (scrcpy 2.2+) | Nahi |
 | Status | Production-quality | **Prototype** |
 
-**Zyadatar logon ke liye Mode A better hai** — koi APK nahi chahiye, latency kam,
-audio clear. Mode B tab chuno jab aapko phone par ek asli installable app chahiye
-ho (ya seekhne ke liye ki engine andar se kaise kaam karta hai).
+**Zyadatar logon ke liye Mode A better hai.** Mode B seekhne/experiment ke liye.
 
 ---
 
 ## Repo layout
 
 ```
-PhoneMirror.py            # Mode A: scrcpy wrapper GUI (USB / Wi-Fi)
+PhoneMirror.py            # Mode A: scrcpy wrapper GUI (multi-device, recording, camera)
 PhoneMirrorReceiver.py    # Mode B: PC receiver (ffplay low-latency playback)
 android/                  # Mode B: Android app (Kotlin, MediaProjection + MediaCodec)
 .github/workflows/
@@ -33,8 +34,9 @@ requirements.txt
 
 # Mode A — scrcpy wrapper (recommended)
 
-Low-latency, USB ya Wi-Fi, clear audio, input control, auto-reconnect.
-**Phone par kuch install nahi hota** — scrcpy ka server adb khud push karta hai.
+Low-latency USB/Wi-Fi mirroring, clear audio, input control, auto-reconnect,
+**multi-device**, **screen recording**, aur **camera mirroring**.
+Phone par kuch install nahi hota.
 
 ## Setup
 
@@ -43,11 +45,35 @@ Low-latency, USB ya Wi-Fi, clear audio, input control, auto-reconnect.
 3. Phone par **USB debugging** on karo → USB se jodo → "Allow" dabao.
 4. `python PhoneMirror.py`
 
+## Multi-device
+
+- **Device** list me ek se zyada phone chuno: **Ctrl + click** (ek-ek jodne ke liye)
+  ya **Shift + click** (range ke liye).
+- **Start Mirroring** dabao — har device ke liye alag scrcpy window khulti hai.
+- Har device ka apna **auto-reconnect** chalta hai; log me har line `[serial]` prefix
+  ke saath aati hai.
+- **Stop All** sab sessions band kar deta hai.
+- Wi-Fi helpers (Enable/Connect/detect IP) primary (pehle chune gaye) device par chalte hain.
+
+## Screen recording
+
+- **7. Recording** me "Record session to file" on karo.
+- "Save as..." se path chuno, ya khali chhodo — phir `~/Videos` me
+  `PhoneMirror_<serial>_<timestamp>.mp4` ban jaati hai.
+- Multi-device par file naam me serial khud jud jaata hai (jaise `sess_A.mp4`, `sess_B.mp4`).
+- Format extension se decide hota hai (`.mp4` ya `.mkv`).
+
+## Camera mirroring
+
+- **5. Video** → Source: **Camera** chuno (scrcpy 2.2+ chahiye).
+- Facing: `back` / `front` / `external`; Camera size: `1920x1080` / `1280x720` / etc.
+- Camera FPS alag se set hota hai.
+- Camera mode me `Max size` slider disable ho jaata hai (uski jagah `--camera-size` lagta hai).
+
 ## USB vs Wi-Fi
 
 - **USB** — lowest latency (30–70 ms), sabse stable. Internet use hi nahi karta.
-- **Wi-Fi** — cable-free. Setup: USB se jodo → **Enable Wi-Fi** → cable nikaalo →
-  **Connect**. Latency zyada (100–250 ms); bitrate 4M, fps 30–45 rakho.
+- **Wi-Fi** — cable-free. Setup: USB se jodo → **Enable Wi-Fi** → cable nikaalo → **Connect**.
 
 ## Presets
 
@@ -63,27 +89,24 @@ Low-latency, USB ya Wi-Fi, clear audio, input control, auto-reconnect.
 Mouse = touch, keyboard = typing (scrcpy me default on). App se:
 `No control` toggle, aur keyboard mode `default` / `uhid` (Android 11+) / `sdk` / `disabled`.
 
-## Auto-reconnect
+## Auto-reconnect (per device)
 
-Disconnect hone par (cable hila, phone drop) app khud `adb` se check karke
-scrcpy dobara launch kar deta hai. Retry delay aur max attempts tunable.
+Disconnect hone par (cable hila, phone drop) app khud `adb` se check karke us device
+ka scrcpy dobara launch kar deta hai. Retry delay aur max attempts tunable.
 
 ---
 
 # Mode B — Standalone (APK + receiver)
 
-Apna engine: phone screen capture karta hai aur PC ko stream bhejta hai. scrcpy
-ya adb ki zaroorat nahi.
+Apna engine: phone screen capture karta hai aur PC ko stream bhejta hai.
 
-> **Prototype:** sirf video, ek client, app foreground me rehni chahiye.
-> Audio abhi nahi. Latency scrcpy se zyada ho sakti hai.
+> **Prototype:** sirf video, ek client, app foreground me rehni chahiye. Audio abhi nahi.
 
 ## APK install karo (phone)
 
-1. Release se `PhoneMirrorServer.apk` download karo.
-2. Phone par install karo (unknown sources allow karna padega).
-3. App kholo → **Start server** → screen capture ki permission do.
-4. App screen par apna **IP** aur **port (27183)** dikhayegi — yaad rakho.
+1. Release se `PhoneMirrorServer.apk` download karo → install karo.
+2. App kholo → **Start server** → screen capture permission do.
+3. App jo **IP** aur port (**27183**) dikhaye, wo note karo.
 
 ## PC receiver chalao
 
@@ -91,36 +114,26 @@ ya adb ki zaroorat nahi.
 2. `python PhoneMirrorReceiver.py`
 3. Phone ka IP daalo (port 27183) → **Connect & Play**.
 
-Yeh phone se raw H.264 stream leta hai aur **ffplay** se low-latency playback karta hai
-(`-fflags nobuffer -flags low_delay -probesize 32 -frameduration 0 -framedrop`).
+Phone aur PC same Wi-Fi par hone chahiye. Windows Firewall pehli baar pooch sakta hai.
 
-Phone aur PC **same Wi-Fi** par hone chahiye. Windows Firewall pehli baar pooch sakta hai.
+## Andar se kaise kaam karta hai
 
-## Yeh andar se kaise kaam karta hai
-
-1. **Capture** — `MediaProjection` + `VirtualDisplay` screen ko ek Surface par bhejta hai.
-2. **Encode** — `MediaCodec` (hardware H.264) us Surface ko encode karta hai,
-   8 Mbps, 30 fps, max 1280px.
-3. **Bitstream** — MediaCodec AVCC (length-prefixed) deta hai; app use **Annex-B**
-   (start codes) me badal ke bhejta hai, kyunki ffplay raw H.264 Annex-B maangta hai.
-4. **Transport** — raw stream TCP port 27183 par.
-5. **Decode** — PC par ffplay decode + render karta hai.
+1. **Capture** — `MediaProjection` + `VirtualDisplay` → Surface.
+2. **Encode** — `MediaCodec` hardware H.264, 8 Mbps, 30 fps, max 1280px.
+3. **Bitstream** — AVCC → Annex-B convert (ffplay raw H.264 Annex-B maangta hai).
+4. **Transport** — TCP port 27183.
+5. **Decode** — PC par ffplay.
 
 ---
 
 ## Build (CI)
 
-Har push par GitHub Actions dono cheezein build karta hai:
-- `.exe` (Windows runner, PyInstaller) — `build.yml`
-- `.apk` (Ubuntu runner, Gradle) — `build-apk.yml`
-
-Tag (`v*`) push karne par dono files release me attach ho jaate hain.
+Har push par GitHub Actions dono build karta hai: `.exe` (Windows) aur `.apk` (Ubuntu).
+Tag (`v*`) par dono release me attach ho jaate hain.
 
 Local build:
 ```
-# exe
 pip install pyinstaller && pyinstaller --onefile --noconsole --name PhoneMirror PhoneMirror.py
-# apk
 cd android && gradle assembleDebug
 ```
 
@@ -131,18 +144,18 @@ cd android && gradle assembleDebug
 **Mode A**
 - "unauthorized" device — phone par "Allow" accept karo, ya `adb kill-server`.
 - Wi-Fi connect nahi — same Wi-Fi? `adb tcpip 5555` chalaya? firewall port 5555?
-- Audio nahi — scrcpy 2.0+ chahiye.
+- Camera nahi chala — scrcpy 2.2+ chahiye (`scrcpy --version`).
+- Recording file nahi bani — folder ka path valid hai? disk space hai?
+- Multi-device me ek window nahi khuli — us device ka serial galat/stale? Refresh karo.
 
 **Mode B**
-- Receiver connect nahi — phone aur PC same Wi-Fi? App chal rahi hai? Firewall port 27183?
-- ffplay window nahi khulti — ffmpeg install hai? `ffplay -version` chala ke check karo.
-- Stream ruk jaata hai — phone par app foreground me rakho (background me Android capture rok deta hai).
-- Audio nahi aata — Mode B abhi video-only hai.
+- Receiver connect nahi — same Wi-Fi? app chalu? firewall port 27183?
+- ffplay window nahi khulti — ffmpeg install hai? `ffplay -version`.
+- Stream ruk jaata hai — phone par app foreground me rakho.
 
 ---
 
 ## Aage kya
 
-Mode B me add ho sakta hai: audio (AudioPlaybackCapture + Opus), foreground service
-(background streaming), touch/input reverse channel, multi-client. Mode A me:
-clipboard sync, multi-device.
+Mode A: clipboard sync, settings save/load, audio-only mode.
+Mode B: audio (AudioPlaybackCapture + Opus), foreground service, input reverse channel.
