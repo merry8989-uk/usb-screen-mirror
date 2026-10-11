@@ -24,13 +24,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install platform & build-tools
+      - name: Prepare Android SDK
         run: |
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMGR=$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1)
+          if [ -z "$SDKMGR" ]; then
+            echo "Preinstalled sdkmanager nahi mila -> download kar raha hoon"
+            SDK="$HOME/android-sdk"
+            mkdir -p "$SDK/cmdline-tools"
+            (
+              cd "$SDK/cmdline-tools" &&
+              curl -sSL -o c.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip &&
+              unzip -q c.zip &&
+              mv cmdline-tools latest
+            )
+            SDKMGR="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          echo "Using sdkmanager: $SDKMGR"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          "$SDKMGR" "platforms;android-34" "build-tools;34.0.0" "platform-tools" > /dev/null
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
