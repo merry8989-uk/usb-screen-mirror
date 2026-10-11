@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-PhoneMirror  -  USB Screen Mirror for Android, powered by scrcpy.
+PhoneMirror  -  Screen Mirror for Android, powered by scrcpy.
 
 Ek chhota Windows + Python GUI jo scrcpy ko wrap karta hai.
 Kaam:
-  * USB se jude Android devices detect karta hai (adb ke through)
+  * USB ya Wi-Fi (TCP/IP) se jude Android devices detect karta hai (adb ke through)
   * Kam-latency / kam-phone-load ke liye ready-made presets deta hai
   * Clear audio forwarding (Opus) with tunable bitrate/buffer
+  * Input control: mouse/keyboard se phone chalana (default on)
   * Auto-reconnect: cable hile ya phone disconnect ho to khud wapas judta hai
   * scrcpy ko sahi flags ke saath launch karta hai aur uski output dikhata hai
 
@@ -19,6 +20,7 @@ Run:  python PhoneMirror.py
 """
 
 import os
+import re
 import sys
 import time
 import shutil
@@ -28,7 +30,7 @@ import queue
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
-APP_TITLE = "PhoneMirror  -  USB Screen Mirror (scrcpy wrapper)"
+APP_TITLE = "PhoneMirror  -  USB / Wi-Fi Screen Mirror (scrcpy wrapper)"
 IS_WINDOWS = (os.name == "nt")
 # Windows par child process ka black console window chhupane ke liye
 CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
@@ -58,6 +60,19 @@ def find_executable(name):
         if c and os.path.isfile(c):
             return c
     return None
+
+
+def run_adb(adb_path, args, timeout=20):
+    """adb command chalao. Returns (ok, output_text)."""
+    try:
+        proc = subprocess.run(
+            [adb_path] + args, capture_output=True, text=True,
+            timeout=timeout, creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, str(exc)
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    return proc.returncode == 0, out
 
 
 def list_devices(adb_path):
@@ -96,6 +111,23 @@ def list_devices(adb_path):
             label += "   [%s]" % state
         devices.append({"serial": serial, "state": state, "model": model, "label": label})
     return devices, None
+
+
+def detect_phone_ip(adb_path, serial):
+    """USB se jude phone ka Wi-Fi IP nikalo. Returns ip string or None."""
+    base = ["-s", serial] if serial else []
+    ok, out = run_adb(adb_path, base + ["shell", "ip", "route"])
+    if ok:
+        m = re.search(r"src\s+(\d+\.\d+\.\d+\.\d+)", out)
+        if m:
+            return m.group(1)
+    # fallback: wlan0 address
+    ok2, out2 = run_adb(adb_path, base + ["shell", "ip", "-f", "inet", "addr", "show", "wlan0"])
+    if ok2:
+        m2 = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", out2)
+        if m2:
+            return m2.group(1)
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -147,12 +179,18 @@ def build_command(scrcpy_path, serial, s):
     else:
         cmd += ["--no-audio"]
 
+    # --- input control ---
+    if s.get("no_control"):
+        cmd += ["--no-control"]
+    else:
+        kb = s.get("keyboard_mode", "default")
+        if kb and kb != "default":
+            cmd += ["--keyboard", kb]
+
     if s.get("turn_screen_off"):
         cmd += ["--turn-screen-off"]
     if s.get("stay_awake"):
         cmd += ["--stay-awake"]
-    if s.get("no_control"):
-        cmd += ["--no-control"]
     if s.get("always_on_top"):
         cmd += ["--always-on-top"]
     if s.get("print_fps"):
@@ -167,7 +205,7 @@ class PhoneMirrorApp:
     def __init__(self, root):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.minsize(800, 700)
+        self.root.minsize(820, 760)
 
         self.proc = None
         self.log_q = queue.Queue()
@@ -181,6 +219,11 @@ class PhoneMirrorApp:
         self.reconnect_attempts = 0
         self._proc_start_time = 0.0
 
+        # connection
+        self.connection_mode = tk.StringVar(value="usb")
+        self.wifi_ip = tk.StringVar(value="")
+        self.wifi_port = tk.IntVar(value=5555)
+
         # video settings
         self.max_size = tk.IntVar(value=1024)
         self.bitrate = tk.StringVar(value="8M")
@@ -191,10 +234,12 @@ class PhoneMirrorApp:
         self.audio_codec = tk.StringVar(value="opus")
         self.audio_bitrate = tk.StringVar(value="128K")
         self.audio_buffer = tk.IntVar(value=50)
+        # input control
+        self.no_control = tk.BooleanVar(value=False)
+        self.keyboard_mode = tk.StringVar(value="default")
         # other toggles
         self.turn_screen_off = tk.BooleanVar(value=False)
         self.stay_awake = tk.BooleanVar(value=True)
-        self.no_control = tk.BooleanVar(value=False)
         self.always_on_top = tk.BooleanVar(value=False)
         self.print_fps = tk.BooleanVar(value=False)
         # auto-reconnect
@@ -233,19 +278,44 @@ class PhoneMirrorApp:
         self.device_status.grid(row=1, column=0, columnspan=2, sticky="w", padx=8)
         dev.columnconfigure(0, weight=1)
 
+        # --- connection ---
+        conn = ttk.LabelFrame(self.root, text="3. Connection (USB / Wi-Fi)")
+        conn.pack(fill="x", **pad)
+        ttk.Radiobutton(conn, text="USB cable  (recommended - lowest latency)",
+                        value="usb", variable=self.connection_mode).grid(
+            row=0, column=0, columnspan=5, sticky="w", padx=6, pady=(6, 0))
+        ttk.Radiobutton(conn, text="Wi-Fi / TCP-IP  (no cable - higher latency)",
+                        value="wifi", variable=self.connection_mode).grid(
+            row=1, column=0, columnspan=5, sticky="w", padx=6)
+
+        ttk.Label(conn, text="Phone IP:").grid(row=2, column=0, sticky="e", padx=(16, 4), pady=6)
+        ttk.Entry(conn, textvariable=self.wifi_ip, width=16).grid(row=2, column=1, sticky="w")
+        ttk.Label(conn, text="Port:").grid(row=2, column=2, sticky="e", padx=(12, 4))
+        ttk.Entry(conn, textvariable=self.wifi_port, width=7).grid(row=2, column=3, sticky="w")
+        ttk.Button(conn, text="Auto-detect IP", command=self.detect_ip).grid(row=2, column=4, padx=8)
+
+        ttk.Button(conn, text="Enable Wi-Fi", command=self.enable_wifi).grid(row=3, column=0, padx=6, pady=(0, 6), sticky="w")
+        ttk.Button(conn, text="Connect", command=self.connect_wifi).grid(row=3, column=1, padx=6, pady=(0, 6), sticky="w")
+        ttk.Button(conn, text="Disconnect", command=self.disconnect_wifi).grid(row=3, column=2, padx=6, pady=(0, 6), sticky="w")
+
+        ttk.Label(conn, text="Wi-Fi setup: USB se jodo → 'Enable Wi-Fi' → cable nikaalo → 'Connect' dabao. "
+                             "Phir Device list me phone ka IP:PORT wala entry chuno.",
+                  foreground="#666", wraplength=760).grid(
+            row=4, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 6))
+
         # --- presets ---
-        pre = ttk.LabelFrame(self.root, text="3. Preset")
+        pre = ttk.LabelFrame(self.root, text="4. Preset")
         pre.pack(fill="x", **pad)
         for i, name in enumerate(PRESETS):
             ttk.Button(pre, text=name, command=lambda n=name: self.apply_preset(n)).grid(
                 row=0, column=i, padx=6, pady=6, sticky="we")
             pre.columnconfigure(i, weight=1)
         self.preset_desc = ttk.Label(pre, text=PRESETS["Low Latency"]["desc"],
-                                     wraplength=700, foreground="#444")
+                                     wraplength=760, foreground="#444")
         self.preset_desc.grid(row=1, column=0, columnspan=len(PRESETS), sticky="w", padx=8, pady=(0, 6))
 
         # --- video tunables ---
-        tun = ttk.LabelFrame(self.root, text="4. Video")
+        tun = ttk.LabelFrame(self.root, text="5. Video")
         tun.pack(fill="x", **pad)
 
         ttk.Label(tun, text="Max size (px):").grid(row=0, column=0, sticky="w", padx=6, pady=4)
@@ -271,13 +341,12 @@ class PhoneMirrorApp:
         vopts.grid(row=0, column=3, rowspan=4, sticky="nw", padx=16)
         ttk.Checkbutton(vopts, text="Turn phone screen off", variable=self.turn_screen_off).pack(anchor="w")
         ttk.Checkbutton(vopts, text="Stay awake", variable=self.stay_awake).pack(anchor="w")
-        ttk.Checkbutton(vopts, text="No control (sirf dekho)", variable=self.no_control).pack(anchor="w")
         ttk.Checkbutton(vopts, text="Always on top", variable=self.always_on_top).pack(anchor="w")
         ttk.Checkbutton(vopts, text="Print FPS (debug)", variable=self.print_fps).pack(anchor="w")
         tun.columnconfigure(1, weight=1)
 
         # --- audio ---
-        aud = ttk.LabelFrame(self.root, text="5. Audio")
+        aud = ttk.LabelFrame(self.root, text="6. Audio")
         aud.pack(fill="x", **pad)
         ttk.Checkbutton(aud, text="Audio on (clear)", variable=self.audio).grid(
             row=0, column=0, sticky="w", padx=6, pady=6)
@@ -295,7 +364,7 @@ class PhoneMirrorApp:
                      values=[0, 25, 50, 100, 150, 200]).grid(row=0, column=6, sticky="w", padx=(0, 6))
 
         # --- auto-reconnect ---
-        rc = ttk.LabelFrame(self.root, text="6. Auto-reconnect")
+        rc = ttk.LabelFrame(self.root, text="7. Auto-reconnect")
         rc.pack(fill="x", **pad)
         ttk.Checkbutton(rc, text="Auto-reconnect on disconnect", variable=self.auto_reconnect).grid(
             row=0, column=0, sticky="w", padx=6, pady=6)
@@ -303,6 +372,19 @@ class PhoneMirrorApp:
         ttk.Spinbox(rc, from_=1, to=60, textvariable=self.reconnect_delay, width=5).grid(row=0, column=2, sticky="w")
         ttk.Label(rc, text="Max attempts (0 = unlimited):").grid(row=0, column=3, sticky="e", padx=(16, 4))
         ttk.Spinbox(rc, from_=0, to=1000, textvariable=self.reconnect_max, width=6).grid(row=0, column=4, sticky="w", padx=(0, 6))
+
+        # --- input control ---
+        ctl = ttk.LabelFrame(self.root, text="8. Input control (PC se phone chalao)")
+        ctl.pack(fill="x", **pad)
+        ttk.Checkbutton(ctl, text="No control (sirf dekho - input band)",
+                        variable=self.no_control).grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(ctl, text="Keyboard mode:").grid(row=0, column=1, sticky="e", padx=(16, 4))
+        ttk.Combobox(ctl, textvariable=self.keyboard_mode, state="readonly", width=10,
+                     values=["default", "uhid", "sdk", "disabled"]).grid(row=0, column=2, sticky="w")
+        ttk.Label(ctl, text="Mouse = touch, keyboard = typing (default on). uhid = Android 11+ me best. "
+                            "sdk = purane Android. disabled = keyboard band (video+audio chalu rahega).",
+                  foreground="#666", wraplength=760).grid(
+            row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 6))
 
         # --- actions ---
         act = ttk.Frame(self.root)
@@ -316,7 +398,7 @@ class PhoneMirrorApp:
         # --- log ---
         logf = ttk.LabelFrame(self.root, text="Log")
         logf.pack(fill="both", expand=True, **pad)
-        self.log = tk.Text(logf, height=12, wrap="word", bg="#111", fg="#d0d0d0",
+        self.log = tk.Text(logf, height=10, wrap="word", bg="#111", fg="#d0d0d0",
                            insertbackground="#d0d0d0", font=("Consolas", 9))
         self.log.pack(side="left", fill="both", expand=True, padx=(6, 0), pady=6)
         sb = ttk.Scrollbar(logf, command=self.log.yview)
@@ -348,6 +430,15 @@ class PhoneMirrorApp:
         self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _adb(self):
+        """Valid adb path resolve karo."""
+        adb = self.adb_path.get().strip()
+        if not adb or not os.path.exists(adb):
+            adb = find_executable("adb")
+            if adb:
+                self.adb_path.set(adb)
+        return adb
+
     def apply_preset(self, name):
         p = PRESETS[name]
         self.max_size.set(p["max_size"])
@@ -372,9 +463,10 @@ class PhoneMirrorApp:
             "audio_codec": self.audio_codec.get(),
             "audio_bitrate": self.audio_bitrate.get(),
             "audio_buffer": int(self.audio_buffer.get()),
+            "no_control": self.no_control.get(),
+            "keyboard_mode": self.keyboard_mode.get(),
             "turn_screen_off": self.turn_screen_off.get(),
             "stay_awake": self.stay_awake.get(),
-            "no_control": self.no_control.get(),
             "always_on_top": self.always_on_top.get(),
             "print_fps": self.print_fps.get(),
         }
@@ -385,13 +477,69 @@ class PhoneMirrorApp:
             return None
         return self.devices[idx]["serial"]
 
+    # ---------------- Wi-Fi helpers ----------------
+    def detect_ip(self):
+        adb = self._adb()
+        if not adb:
+            self._append_log("[!] adb nahi mila.")
+            return
+        serial = self.selected_serial()
+        ip = detect_phone_ip(adb, serial)
+        if ip:
+            self.wifi_ip.set(ip)
+            self._append_log("[i] Phone IP mila: %s" % ip)
+            self.status.configure(text="Phone IP: %s" % ip)
+        else:
+            self._append_log("[!] IP detect nahi hua.")
+            messagebox.showwarning("IP nahi mila",
+                                   "Phone Wi-Fi se juda hai aur USB se connected hai?\n"
+                                   "Manually bhi IP daal sakte ho.")
+
+    def enable_wifi(self):
+        adb = self._adb()
+        if not adb:
+            self._append_log("[!] adb nahi mila.")
+            return
+        serial = self.selected_serial()
+        if not serial:
+            messagebox.showwarning("Device nahi", "Pehle USB se phone jodo aur Refresh dabao.")
+            return
+        port = int(self.wifi_port.get())
+        ok, out = run_adb(adb, ["-s", serial, "tcpip", str(port)])
+        self._append_log("[i] adb tcpip %d -> %s" % (port, "OK" if ok else out))
+        if ok:
+            self.status.configure(text="Wi-Fi mode on. Ab cable nikaalo aur 'Connect' dabao.")
+        else:
+            messagebox.showerror("Enable Wi-Fi fail", out or "adb tcpip fail hua.")
+
+    def connect_wifi(self):
+        adb = self._adb()
+        if not adb:
+            self._append_log("[!] adb nahi mila.")
+            return
+        ip = self.wifi_ip.get().strip()
+        if not ip:
+            messagebox.showwarning("IP nahi", "Phone IP daalo ya 'Auto-detect IP' dabao.")
+            return
+        port = int(self.wifi_port.get())
+        target = "%s:%d" % (ip, port)
+        ok, out = run_adb(adb, ["connect", target])
+        self._append_log("[i] adb connect %s -> %s" % (target, out))
+        self.refresh_devices()
+        self.status.configure(text="Connect try kiya. Device list me check karo.")
+
+    def disconnect_wifi(self):
+        adb = self._adb()
+        ip = self.wifi_ip.get().strip()
+        if adb and ip:
+            target = "%s:%d" % (ip, int(self.wifi_port.get()))
+            ok, out = run_adb(adb, ["disconnect", target])
+            self._append_log("[i] adb disconnect %s -> %s" % (target, out))
+            self.refresh_devices()
+
     # ---------------- devices ----------------
     def refresh_devices(self):
-        adb = self.adb_path.get().strip()
-        if not adb or not os.path.exists(adb):
-            adb = find_executable("adb")
-            if adb:
-                self.adb_path.set(adb)
+        adb = self._adb()
         if not adb:
             self.device_status.configure(text="adb nahi mila. Upar path set karo ya platform-tools install karo.",
                                          foreground="#b00")
@@ -530,7 +678,7 @@ class PhoneMirrorApp:
             return
 
         # Device abhi juda hua hai ya nahi, wo check karo
-        adb = self.adb_path.get().strip() or find_executable("adb")
+        adb = self._adb()
         serial = self.selected_serial()
         present = False
         if adb:
