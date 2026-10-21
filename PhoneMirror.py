@@ -10,8 +10,9 @@ Features:
   * Camera mirroring: phone ka camera PC par (scrcpy 2.2+)
   * Low-latency presets, clear audio (Opus), input control
   * Auto-reconnect per device
-  * Diagnostics: technical data + logs export (.txt/.md/.json/.csv/.xlsx),
-    email compose (pre-filled), copy, refresh, clean. On/off setting (default ON).
+  * Diagnostics: structured event logging (ProGallery Logging Spec v1.0) +
+    logs export (.txt/.md/.json/.jsonl/.csv/.xlsx), email compose (pre-filled),
+    copy, refresh, clean. On/off setting (default ON).
 
 Yeh scrcpy ka engine use karta hai (hardware encode + USB transport).
 
@@ -27,6 +28,8 @@ import sys
 import csv
 import json
 import time
+import random
+import hashlib
 import shutil
 import platform
 import datetime
@@ -34,12 +37,13 @@ import subprocess
 import threading
 import queue
 import webbrowser
+import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from urllib.parse import quote
 
 APP_TITLE = "PhoneMirror  -  Screen Mirror (scrcpy wrapper)"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 DIAG_EMAIL = "br19shc39@gmail.com"
 
 IS_WINDOWS = (os.name == "nt")
@@ -68,6 +72,152 @@ def save_config(cfg):
             json.dump(cfg, f, indent=2)
     except Exception:  # noqa: BLE001
         pass
+
+
+# --------------------------------------------------------------------------- #
+#  Structured logging  -  ProGallery Logging Spec v1.0
+#  (common envelope, log levels, sampling, retention, PII redaction)
+# --------------------------------------------------------------------------- #
+LOG_SCHEMA_VERSION = "1.0.0"
+LOG_MAX_EVENTS = 5000           # retention: memory/export me max events
+LOG_RETENTION_DAYS = 7          # retention: isse purane events drop
+LOG_SAMPLE_INFO_RATE = 1.0      # info/debug sample rate (errors/warn always 100%)
+LOG_RELEASE_CHANNEL = "production"
+
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_WINPATH_RE = re.compile(r"[A-Za-z]:\\[^\s\"]+")
+_POSIXPATH_RE = re.compile(r"(?<![\w:])/(?:Users|home|tmp|var|mnt|media|sdcard|opt)/[^\s\"]*")
+
+
+def redact(text):
+    """PII redaction - app aur web ke liye identical rules.
+    Emails aur file paths hataata hai (spec Part F)."""
+    if text is None:
+        return ""
+    s = str(text)
+    s = _EMAIL_RE.sub("<email>", s)
+    s = _WINPATH_RE.sub("<path>", s)
+    s = _POSIXPATH_RE.sub("<path>", s)
+    return s
+
+
+def salted_hash(value, salt):
+    """user_id / device id sirf salted hash ke roop me (raw identifier nahi)."""
+    if not value:
+        return ""
+    return "id_" + hashlib.sha256((salt + str(value)).encode("utf-8")).hexdigest()[:12]
+
+
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _rand_hex(n=16):
+    return "".join(random.choice("0123456789abcdef") for _ in range(n))
+
+
+def _platform_enum():
+    s = platform.system().lower()
+    if s.startswith("win"):
+        return "windows"
+    if s == "darwin":
+        return "macos"
+    return s or "unknown"
+
+
+def _env_os():
+    return "%s %s" % (platform.system(), platform.release())
+
+
+def _device_model():
+    return platform.machine() or platform.node() or "unknown"
+
+
+def make_event(event_name, log_level, screen_or_route, session_id,
+               attempt_id=None, user_id=None, network_type=None, props=None):
+    """ProGallery common event envelope (Part B)."""
+    ev = {
+        "event_name": event_name,
+        "schema_version": LOG_SCHEMA_VERSION,
+        "timestamp": utc_now(),
+        "session_id": session_id,
+        "platform": _platform_enum(),
+        "app_version": APP_VERSION,
+        "os": _env_os(),
+        "device_model": _device_model(),
+        "screen_or_route": screen_or_route,
+        "log_level": log_level,
+        "release_channel": LOG_RELEASE_CHANNEL,
+    }
+    if attempt_id:
+        ev["attempt_id"] = attempt_id
+    if user_id:
+        ev["user_id"] = user_id
+    if network_type:
+        ev["network_type"] = network_type
+    if props:
+        for k, v in props.items():
+            ev[k] = redact(v) if isinstance(v, str) else v
+    return ev
+
+
+class StructuredLogger:
+    """Event envelope + log levels + sampling + retention."""
+
+    def __init__(self, session_id, user_id=""):
+        self.session_id = session_id
+        self.user_id = user_id
+        self.events = []
+        self.attempt_seq = 0
+
+    def new_attempt_id(self, prefix="att"):
+        self.attempt_seq += 1
+        return "%s_%04d" % (prefix, self.attempt_seq)
+
+    def log(self, event_name, log_level, screen_or_route,
+            attempt_id=None, props=None, network_type=None):
+        # sampling: errors/warn hamesha 100%, info/debug sampled
+        if log_level in ("debug", "info") and LOG_SAMPLE_INFO_RATE < 1.0:
+            if random.random() > LOG_SAMPLE_INFO_RATE:
+                return None
+        ev = make_event(event_name, log_level, screen_or_route, self.session_id,
+                        attempt_id=attempt_id, user_id=self.user_id,
+                        network_type=network_type, props=props)
+        self.events.append(ev)
+        self._enforce_retention()
+        return ev
+
+    def _enforce_retention(self):
+        if len(self.events) > LOG_MAX_EVENTS:
+            del self.events[:len(self.events) - LOG_MAX_EVENTS]
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=LOG_RETENTION_DAYS)
+        keep = []
+        for e in self.events:
+            try:
+                ts = datetime.datetime.strptime(e["timestamp"], "%Y-%m-%dT%H:%M:%SZ")
+                ts = ts.replace(tzinfo=datetime.timezone.utc)
+                if ts >= cutoff:
+                    keep.append(e)
+            except Exception:  # noqa: BLE001
+                keep.append(e)
+        self.events = keep
+
+    def to_jsonl(self):
+        return "\n".join(json.dumps(e, ensure_ascii=False) for e in self.events)
+
+
+def sample_events(session_id="sess_sample"):
+    """CI validation ke liye sample events (schema ke against check hote hain)."""
+    lg = StructuredLogger(session_id)
+    lg.log("session_start", "info", "Main", props={"start_type": "cold"})
+    lg.log("screen_view", "info", "Diagnostics", props={"screen_name": "Diagnostics", "previous_screen": "Main"})
+    lg.log("device_state_resolved", "info", "Main", props={"state": "authorized", "device_count": 1})
+    lg.log("mirror_requested", "info", "Main", attempt_id="att_0001", props={"device_count": 1, "video_source": "display"})
+    lg.log("mirror_result", "info", "Main", attempt_id="att_0001", props={"outcome": "success"})
+    lg.log("adb_command", "debug", "Main", props={"command": "adb devices", "outcome": "success", "latency_ms": 12})
+    lg.log("error_state_shown", "error", "Main", props={"error_code": "scrcpy_missing", "message_key": "scrcpy_not_found"})
+    lg.log("export_saved", "info", "Diagnostics", props={"format": "jsonl", "outcome": "success"})
+    return lg.events
 
 
 # --------------------------------------------------------------------------- #
@@ -243,12 +393,23 @@ def build_command(scrcpy_path, serial, s):
 # --------------------------------------------------------------------------- #
 #  Diagnostics report rendering
 # --------------------------------------------------------------------------- #
+def _event_lines(rep, limit=200):
+    evs = rep.get("events", [])
+    out = []
+    for e in evs[-limit:]:
+        out.append("  %s  %-5s  %-22s  %s" % (
+            e.get("timestamp", ""), e.get("log_level", ""),
+            e.get("event_name", ""), e.get("screen_or_route", "")))
+    return out
+
+
 def render_txt(rep):
     L = []
     L.append("PhoneMirror diagnostics report")
     L.append("Generated: %s" % rep["generated_at"])
     L.append("App: %s v%s" % (rep["app"]["name"], rep["app"]["version"]))
     L.append("Diagnostics collection: %s" % ("ON" if rep["diagnostics_enabled"] else "OFF"))
+    L.append("Log schema: %s" % rep.get("logging", {}).get("schema_version", ""))
     L.append("")
     L.append("== Environment ==")
     for k, v in rep["environment"].items():
@@ -266,9 +427,12 @@ def render_txt(rep):
     for k, v in rep["settings"].items():
         L.append("  %-18s %s" % (k + ":", v))
     L.append("")
-    L.append("== Log (%d lines) ==" % len(rep["log"]))
-    if not rep["log"]:
+    L.append("== Structured events (%d) ==" % len(rep.get("events", [])))
+    if not rep.get("events"):
         L.append("  (kuch nahi - diagnostics OFF ho sakta hai)")
+    L.extend(_event_lines(rep))
+    L.append("")
+    L.append("== Log (%d lines) ==" % len(rep["log"]))
     for e in rep["log"]:
         pref = ("[%s] " % e["serial"]) if e.get("serial") else ""
         L.append("  %s  %s%s" % (e["time"], pref, e["text"]))
@@ -282,6 +446,7 @@ def render_md(rep):
     L.append("- **Generated:** %s" % rep["generated_at"])
     L.append("- **App:** %s v%s" % (rep["app"]["name"], rep["app"]["version"]))
     L.append("- **Diagnostics:** %s" % ("ON" if rep["diagnostics_enabled"] else "OFF"))
+    L.append("- **Log schema:** %s" % rep.get("logging", {}).get("schema_version", ""))
     L.append("")
     L.append("## Environment")
     L.append("")
@@ -311,6 +476,14 @@ def render_md(rep):
     for k, v in rep["settings"].items():
         L.append("| %s | %s |" % (k, v))
     L.append("")
+    L.append("## Structured events (%d)" % len(rep.get("events", [])))
+    L.append("")
+    L.append("| timestamp | level | event_name | screen_or_route |")
+    L.append("|---|---|---|---|")
+    for e in rep.get("events", [])[-200:]:
+        L.append("| %s | %s | %s | %s |" % (e.get("timestamp", ""), e.get("log_level", ""),
+                                            e.get("event_name", ""), e.get("screen_or_route", "")))
+    L.append("")
     L.append("## Log (%d lines)" % len(rep["log"]))
     L.append("")
     L.append("```")
@@ -327,12 +500,14 @@ def render_email_body(rep, attach_path, max_lines=40, limit=1800):
         "Generated: %s" % rep["generated_at"],
         "App: %s v%s" % (rep["app"]["name"], rep["app"]["version"]),
         "Diagnostics: %s" % ("ON" if rep["diagnostics_enabled"] else "OFF"),
+        "Log schema: %s" % rep.get("logging", {}).get("schema_version", ""),
         "",
         "OS: %s" % rep["environment"].get("os", ""),
         "Python: %s" % rep["environment"].get("python", ""),
         "scrcpy: %s" % rep["tools"].get("scrcpy_version", ""),
         "adb: %s" % rep["tools"].get("adb_version", ""),
         "Devices: %d" % len(rep["devices"]),
+        "Structured events: %d" % len(rep.get("events", [])),
         "",
         "--- Log (last %d lines) ---" % max_lines,
     ]
@@ -357,6 +532,7 @@ def write_xlsx(rep, path):
     ws.append(["Generated", rep["generated_at"]])
     ws.append(["App", "%s v%s" % (rep["app"]["name"], rep["app"]["version"])])
     ws.append(["Diagnostics", "ON" if rep["diagnostics_enabled"] else "OFF"])
+    ws.append(["Log schema", rep.get("logging", {}).get("schema_version", "")])
     for k, v in rep["environment"].items():
         ws.append(["env." + k, str(v)])
     for k, v in rep["tools"].items():
@@ -372,6 +548,12 @@ def write_xlsx(rep, path):
     for k, v in rep["settings"].items():
         st.append([k, str(v)])
 
+    ev = wb.create_sheet("Events")
+    ev.append(["timestamp", "log_level", "event_name", "screen_or_route", "attempt_id", "session_id"])
+    for e in rep.get("events", []):
+        ev.append([e.get("timestamp", ""), e.get("log_level", ""), e.get("event_name", ""),
+                   e.get("screen_or_route", ""), e.get("attempt_id", ""), e.get("session_id", "")])
+
     lg = wb.create_sheet("Log")
     lg.append(["Time", "Serial", "Message"])
     for e in rep["log"]:
@@ -386,6 +568,11 @@ def write_csv(rep, path):
         w.writerow(["time", "serial", "message"])
         for e in rep["log"]:
             w.writerow([e["time"], e.get("serial", ""), e["text"]])
+
+
+def write_jsonl(rep, path):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(json.dumps(e, ensure_ascii=False) for e in rep.get("events", [])))
 
 
 # --------------------------------------------------------------------------- #
@@ -415,7 +602,7 @@ class DiagnosticsWindow(tk.Toplevel):
         super().__init__(app.root)
         self.app = app
         self.title("Diagnostics  -  PhoneMirror")
-        self.minsize(760, 600)
+        self.minsize(780, 620)
         self._last_path = None
 
         pad = {"padx": 8, "pady": 4}
@@ -425,7 +612,8 @@ class DiagnosticsWindow(tk.Toplevel):
         ttk.Checkbutton(top, text="Collect diagnostics (logs + technical data)  -  default ON",
                         variable=app.diag_enabled, command=self._toggle).grid(
             row=0, column=0, sticky="w", padx=6, pady=6)
-        ttk.Label(top, text="Off karne par app koi data collect nahi karegi (export sirf summary dega).",
+        ttk.Label(top, text="Off karne par app koi data collect nahi karegi (export sirf summary dega). "
+                            "Structured events ProGallery Logging Spec v1.0 ke hisaab se hain.",
                   foreground="#666").grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
 
         self.preview = tk.Text(self, height=18, wrap="none", bg="#111", fg="#d0d0d0",
@@ -441,8 +629,8 @@ class DiagnosticsWindow(tk.Toplevel):
 
         ttk.Label(bar, text="Format:").pack(side="left", padx=(16, 4))
         self.fmt = tk.StringVar(value="txt")
-        ttk.Combobox(bar, textvariable=self.fmt, state="readonly", width=7,
-                     values=["txt", "md", "json", "csv", "xlsx"]).pack(side="left")
+        ttk.Combobox(bar, textvariable=self.fmt, state="readonly", width=8,
+                     values=["txt", "md", "json", "jsonl", "csv", "xlsx"]).pack(side="left")
         ttk.Button(bar, text="Save as...", command=self.save_as).pack(side="left", padx=6)
 
         bar2 = ttk.Frame(self)
@@ -472,7 +660,8 @@ class DiagnosticsWindow(tk.Toplevel):
         self.preview.delete("1.0", "end")
         self.preview.insert("end", text)
         self.preview.configure(state="disabled")
-        self.status.configure(text="Report refreshed (%d log lines)." % len(self.app.diag))
+        self.status.configure(text="Report refreshed - %d log lines, %d events."
+                              % (len(self.app.diag), len(self.app.logger.events)))
 
     def clean(self):
         if not messagebox.askyesno("Clean", "Diagnostics log aur collected data clear kar dun?"):
@@ -534,23 +723,29 @@ class PhoneMirrorApp:
         self.root.minsize(880, 820)
 
         cfg = load_config()
+        salt = cfg.get("salt") or _rand_hex(32)
+        if cfg.get("salt") != salt:
+            cfg["salt"] = salt
+            save_config(cfg)
+        self._salt = salt
+
         self.log_q = queue.Queue()
         self.devices = []
         self.sessions = {}
-        self.diag = []                      # collected diagnostics entries
+        self.diag = []                      # collected human-readable log entries
         self._diag_win = None
+        self._launch_attempt = None
+        self.session_id = "sess_" + _rand_hex(12)
+        self.logger = StructuredLogger(self.session_id)
         self.scrcpy_path = tk.StringVar(value=find_executable("scrcpy") or "")
         self.adb_path = tk.StringVar(value=find_executable("adb") or "")
 
-        # diagnostics on/off (default ON, persisted)
         self.diag_enabled = tk.BooleanVar(value=bool(cfg.get("diagnostics_enabled", True)))
 
-        # connection
         self.connection_mode = tk.StringVar(value="usb")
         self.wifi_ip = tk.StringVar(value="")
         self.wifi_port = tk.IntVar(value=5555)
 
-        # video
         self.video_source = tk.StringVar(value="display")
         self.max_size = tk.IntVar(value=1024)
         self.bitrate = tk.StringVar(value="8M")
@@ -560,34 +755,41 @@ class PhoneMirrorApp:
         self.camera_size = tk.StringVar(value="1280x720")
         self.camera_fps = tk.IntVar(value=30)
 
-        # audio
         self.audio = tk.BooleanVar(value=True)
         self.audio_codec = tk.StringVar(value="opus")
         self.audio_bitrate = tk.StringVar(value="128K")
         self.audio_buffer = tk.IntVar(value=50)
 
-        # recording
         self.record = tk.BooleanVar(value=False)
         self.record_path = tk.StringVar(value="")
 
-        # input
         self.no_control = tk.BooleanVar(value=False)
         self.keyboard_mode = tk.StringVar(value="default")
 
-        # misc
         self.turn_screen_off = tk.BooleanVar(value=False)
         self.stay_awake = tk.BooleanVar(value=True)
         self.always_on_top = tk.BooleanVar(value=False)
         self.print_fps = tk.BooleanVar(value=False)
 
-        # auto-reconnect
         self.auto_reconnect = tk.BooleanVar(value=True)
         self.reconnect_delay = tk.IntVar(value=3)
         self.reconnect_max = tk.IntVar(value=0)
 
         self._build_ui()
         self._poll_log()
+        self._ev("session_start", "info", "Main", props={"start_type": "cold"})
         self.refresh_devices()
+
+    # ---------------- structured events ----------------
+    def _ev(self, event_name, log_level, screen_or_route, attempt_id=None, props=None):
+        """Structured event log (sirf diagnostics ON hone par)."""
+        if not self.diag_enabled.get():
+            return None
+        return self.logger.log(event_name, log_level, screen_or_route,
+                               attempt_id=attempt_id, props=props)
+
+    def _dev_pseudonym(self, serial):
+        return salted_hash(serial, self._salt)
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -776,12 +978,11 @@ class PhoneMirrorApp:
         self.log.insert("end", prefix + text + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
-        # diagnostics collection
         if self.diag_enabled.get():
             self.diag.append({
                 "time": datetime.datetime.now().strftime("%H:%M:%S"),
                 "serial": serial or "",
-                "text": text,
+                "text": redact(text),
             })
             if len(self.diag) > 5000:
                 del self.diag[:1000]
@@ -794,6 +995,16 @@ class PhoneMirrorApp:
                 self.adb_path.set(adb)
         return adb
 
+    def _run_adb_logged(self, adb, args, screen="Main"):
+        t0 = time.time()
+        ok, out = run_adb(adb, args)
+        self._ev("adb_command", "debug", screen, props={
+            "command": "adb " + " ".join(args),
+            "outcome": "success" if ok else "failed",
+            "latency_ms": int((time.time() - t0) * 1000),
+        })
+        return ok, out
+
     # ---------------- diagnostics ----------------
     def set_diag_enabled(self, value):
         self.diag_enabled.set(bool(value))
@@ -803,6 +1014,7 @@ class PhoneMirrorApp:
 
     def clean_diagnostics(self):
         self.diag = []
+        self.logger.events = []
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
@@ -841,6 +1053,13 @@ class PhoneMirrorApp:
             "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
             "app": {"name": "PhoneMirror", "version": APP_VERSION},
             "diagnostics_enabled": bool(self.diag_enabled.get()),
+            "logging": {
+                "schema_version": LOG_SCHEMA_VERSION,
+                "session_id": self.session_id,
+                "retention_days": LOG_RETENTION_DAYS,
+                "sample_info_rate": LOG_SAMPLE_INFO_RATE,
+                "release_channel": LOG_RELEASE_CHANNEL,
+            },
             "environment": {
                 "os": platform.platform(),
                 "system": platform.system(),
@@ -856,30 +1075,44 @@ class PhoneMirrorApp:
             },
             "devices": devices,
             "settings": self.current_settings(),
+            "events": list(self.logger.events),
             "log": list(self.diag),
         }
 
     def save_report(self, rep, path, fmt):
         fmt = (fmt or "txt").lower().lstrip(".")
-        if fmt == "txt":
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(render_txt(rep))
-        elif fmt == "md":
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(render_md(rep))
-        elif fmt == "json":
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(rep, f, indent=2, ensure_ascii=False)
-        elif fmt == "csv":
-            write_csv(rep, path)
-        elif fmt == "xlsx":
-            try:
-                write_xlsx(rep, path)
-            except ImportError:
-                raise RuntimeError("xlsx ke liye openpyxl chahiye.\n\nInstall: pip install openpyxl\n"
-                                   "(ya CSV/TXT format use karo)")
-        else:
-            raise RuntimeError("Unknown format: %s" % fmt)
+        try:
+            if fmt == "txt":
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(render_txt(rep))
+            elif fmt == "md":
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(render_md(rep))
+            elif fmt == "json":
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(rep, f, indent=2, ensure_ascii=False)
+            elif fmt == "jsonl":
+                write_jsonl(rep, path)
+            elif fmt == "csv":
+                write_csv(rep, path)
+            elif fmt == "xlsx":
+                try:
+                    write_xlsx(rep, path)
+                except ImportError:
+                    raise RuntimeError("xlsx ke liye openpyxl chahiye.\n\nInstall: pip install openpyxl\n"
+                                       "(ya CSV/TXT/JSONL format use karo)")
+            else:
+                raise RuntimeError("Unknown format: %s" % fmt)
+        except RuntimeError:
+            self._ev("export_saved", "error", "Diagnostics",
+                     props={"format": fmt, "outcome": "failed", "error_code": "export_failed"})
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self._ev("export_saved", "error", "Diagnostics",
+                     props={"format": fmt, "outcome": "failed", "error_code": "export_error"})
+            raise
+        self._ev("export_saved", "info", "Diagnostics",
+                 props={"format": fmt, "outcome": "success"})
 
     def email_report(self, gmail=True):
         rep = self.build_report()
@@ -890,12 +1123,13 @@ class PhoneMirrorApp:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(render_md(rep))
         except Exception as exc:  # noqa: BLE001
+            self._ev("email_compose", "error", "Diagnostics",
+                     props={"outcome": "failed", "error_code": "report_save_failed"})
             raise RuntimeError("Report save nahi hui: %s" % exc)
 
         body = render_email_body(rep, path)
         subj = "PhoneMirror diagnostics report - %s" % rep["generated_at"]
 
-        # clipboard me poora report (backup)
         try:
             self.root.clipboard_clear()
             self.root.clipboard_append(render_txt(rep))
@@ -909,16 +1143,30 @@ class PhoneMirrorApp:
             url = "mailto:%s?subject=%s&body=%s" % (DIAG_EMAIL, quote(subj), quote(body))
         webbrowser.open(url)
 
+        self._ev("email_compose", "info", "Diagnostics",
+                 props={"outcome": "success", "channel": "gmail" if gmail else "mailto"})
         self._log(None, "[i] Email compose khula -> %s (report: %s)" % (DIAG_EMAIL, path))
         self.status.configure(text="Email compose khula. Report file: %s" % path)
         return path
 
     def open_diagnostics(self):
+        self._ev("screen_view", "info", "Diagnostics",
+                 props={"screen_name": "Diagnostics", "previous_screen": "Main"})
         if self._diag_win is not None and self._diag_win.winfo_exists():
             self._diag_win.lift()
             self._diag_win.refresh()
             return
         self._diag_win = DiagnosticsWindow(self)
+
+    def _tk_exception(self, exc, val, tb):
+        """Tkinter callback me uncaught exception -> crash event (raw stack nahi)."""
+        tb_text = "".join(traceback.format_exception(exc, val, tb))
+        self._ev("crash", "error", "Main", props={
+            "fatal": False,
+            "exception_type": getattr(exc, "__name__", str(exc)),
+            "stack_trace_hash": hashlib.sha256(tb_text.encode("utf-8")).hexdigest()[:16],
+        })
+        self._log(None, "[!] Unhandled error: %s: %s" % (getattr(exc, "__name__", exc), val))
 
     # ---------------- presets / settings ----------------
     def apply_preset(self, name):
@@ -950,7 +1198,7 @@ class PhoneMirrorApp:
             "audio_bitrate": self.audio_bitrate.get(),
             "audio_buffer": int(self.audio_buffer.get()),
             "record": self.record.get(),
-            "record_path": self.record_path.get(),
+            "record_path": redact(self.record_path.get()),
             "no_control": self.no_control.get(),
             "keyboard_mode": self.keyboard_mode.get(),
             "turn_screen_off": self.turn_screen_off.get(),
@@ -994,6 +1242,8 @@ class PhoneMirrorApp:
         adb = self._adb()
         if not adb:
             self._log(None, "[!] adb nahi mila.")
+            self._ev("error_state_shown", "error", "Main",
+                     props={"error_code": "adb_missing", "message_key": "adb_not_found"})
             return
         ip = detect_phone_ip(adb, self.primary_serial())
         if ip:
@@ -1002,6 +1252,8 @@ class PhoneMirrorApp:
             self.status.configure(text="Phone IP: %s" % ip)
         else:
             self._log(None, "[!] IP detect nahi hua.")
+            self._ev("error_state_shown", "error", "Main",
+                     props={"error_code": "ip_not_found", "message_key": "ip_not_detected"})
             messagebox.showwarning("IP nahi mila", "Phone Wi-Fi se juda hai aur USB se connected hai?")
 
     def enable_wifi(self):
@@ -1011,14 +1263,18 @@ class PhoneMirrorApp:
             return
         serial = self.primary_serial()
         if not serial:
+            self._ev("error_state_shown", "warn", "Main",
+                     props={"error_code": "no_device", "message_key": "no_device_selected"})
             messagebox.showwarning("Device nahi", "Pehle USB se phone jodo aur Refresh dabao.")
             return
         port = int(self.wifi_port.get())
-        ok, out = run_adb(adb, ["-s", serial, "tcpip", str(port)])
+        ok, out = self._run_adb_logged(adb, ["-s", serial, "tcpip", str(port)])
         self._log(None, "[i] adb tcpip %d -> %s" % (port, "OK" if ok else out))
         if ok:
             self.status.configure(text="Wi-Fi mode on. Cable nikaalo aur 'Connect' dabao.")
         else:
+            self._ev("error_state_shown", "error", "Main",
+                     props={"error_code": "tcpip_failed", "message_key": "enable_wifi_failed"})
             messagebox.showerror("Enable Wi-Fi fail", out or "adb tcpip fail hua.")
 
     def connect_wifi(self):
@@ -1028,10 +1284,12 @@ class PhoneMirrorApp:
             return
         ip = self.wifi_ip.get().strip()
         if not ip:
+            self._ev("error_state_shown", "warn", "Main",
+                     props={"error_code": "no_ip", "message_key": "ip_missing"})
             messagebox.showwarning("IP nahi", "Phone IP daalo ya 'Auto-detect IP' dabao.")
             return
         target = "%s:%d" % (ip, int(self.wifi_port.get()))
-        ok, out = run_adb(adb, ["connect", target])
+        ok, out = self._run_adb_logged(adb, ["connect", target])
         self._log(None, "[i] adb connect %s -> %s" % (target, out))
         self.refresh_devices()
         self.status.configure(text="Connect try kiya. Device list check karo.")
@@ -1041,7 +1299,7 @@ class PhoneMirrorApp:
         ip = self.wifi_ip.get().strip()
         if adb and ip:
             target = "%s:%d" % (ip, int(self.wifi_port.get()))
-            ok, out = run_adb(adb, ["disconnect", target])
+            ok, out = self._run_adb_logged(adb, ["disconnect", target])
             self._log(None, "[i] adb disconnect %s -> %s" % (target, out))
             self.refresh_devices()
 
@@ -1051,6 +1309,8 @@ class PhoneMirrorApp:
         if not adb:
             self.device_status.configure(text="adb nahi mila. Upar path set karo.", foreground="#b00")
             self._log(None, "[!] adb nahi mila.")
+            self._ev("device_state_resolved", "error", "Main",
+                     props={"state": "unknown", "device_count": 0, "error_code": "adb_missing"})
             return
 
         prev = set()
@@ -1062,6 +1322,8 @@ class PhoneMirrorApp:
         if err:
             self.device_status.configure(text="Device list error: %s" % err, foreground="#b00")
             self._log(None, "[!] %s" % err)
+            self._ev("device_refresh_result", "error", "Main",
+                     props={"outcome": "failed", "error_code": "list_failed"})
             return
 
         self.devices = newdevs
@@ -1087,6 +1349,17 @@ class PhoneMirrorApp:
         else:
             self.device_status.configure(text="Koi device nahi mila.", foreground="#b60")
         self._log(None, "[i] Devices refresh: %d mile." % len(self.devices))
+
+        if ready:
+            state = "authorized"
+        elif self.devices:
+            state = "unauthorized"
+        else:
+            state = "none"
+        self._ev("device_state_resolved", "info", "Main",
+                 props={"state": state, "device_count": len(self.devices), "ready_count": len(ready)})
+        self._ev("device_refresh_result", "info", "Main",
+                 props={"outcome": "success", "device_count": len(self.devices), "ready_count": len(ready)})
 
     # ---------------- run ----------------
     def copy_command(self):
@@ -1117,13 +1390,22 @@ class PhoneMirrorApp:
     def launch(self):
         scrcpy = self._resolve_scrcpy()
         if not scrcpy:
+            self._ev("error_state_shown", "error", "Main",
+                     props={"error_code": "scrcpy_missing", "message_key": "scrcpy_not_found"})
             messagebox.showerror("scrcpy nahi mila",
                                  "scrcpy.exe ka path set karo.\n\nInstall: winget install Genymobile.scrcpy")
             return
         serials = self.selected_serials()
         if not serials:
+            self._ev("error_state_shown", "warn", "Main",
+                     props={"error_code": "no_device", "message_key": "no_device_selected"})
             messagebox.showwarning("Device nahi", "Pehle device select karo (Ctrl/Shift + click).")
             return
+
+        self._launch_attempt = self.logger.new_attempt_id()
+        self._ev("mirror_requested", "info", "Main", attempt_id=self._launch_attempt,
+                 props={"device_count": len(serials), "video_source": self.video_source.get(),
+                        "connection_mode": self.connection_mode.get()})
         for serial in serials:
             sess = self.sessions.get(serial) or Session(serial)
             self.sessions[serial] = sess
@@ -1140,6 +1422,9 @@ class PhoneMirrorApp:
         scrcpy = self._resolve_scrcpy()
         if not scrcpy:
             self._log(serial, "[!] scrcpy nahi mila, rok raha hoon.")
+            self._ev("mirror_result", "error", "Main", attempt_id=self._launch_attempt,
+                     props={"outcome": "failed", "error_code": "scrcpy_missing",
+                            "device": self._dev_pseudonym(serial)})
             sess.running_intent = False
             self._refresh_buttons()
             return
@@ -1157,6 +1442,9 @@ class PhoneMirrorApp:
             )
         except Exception as exc:  # noqa: BLE001
             self._log(serial, "[!] Launch fail: %s" % exc)
+            self._ev("mirror_result", "error", "Main", attempt_id=self._launch_attempt,
+                     props={"outcome": "failed", "error_code": "launch_failed",
+                            "device": self._dev_pseudonym(serial)})
             sess.proc = None
             sess.running_intent = False
             self._refresh_buttons()
@@ -1164,6 +1452,8 @@ class PhoneMirrorApp:
 
         sess.start_time = time.time()
         sess.running_intent = True
+        self._ev("mirror_result", "info", "Main", attempt_id=self._launch_attempt,
+                 props={"outcome": "success", "device": self._dev_pseudonym(serial)})
         threading.Thread(target=self._reader, args=(serial, sess.proc), daemon=True).start()
         self._refresh_buttons()
 
@@ -1227,7 +1517,17 @@ class PhoneMirrorApp:
         if present:
             sess.reconnect_attempts += 1
             self._log(serial, "[i] Reconnect attempt #%d" % sess.reconnect_attempts)
+            att = self.logger.new_attempt_id("rc")
+            self._ev("reconnect_attempt", "info", "Main", attempt_id=att,
+                     props={"attempt_number": sess.reconnect_attempts,
+                            "device": self._dev_pseudonym(serial)})
+            # user-friendliness signal: reconnect_loop
+            if sess.reconnect_attempts >= 3:
+                self._ev("reconnect_loop", "warn", "Main", attempt_id=att,
+                         props={"attempt_count": sess.reconnect_attempts,
+                                "device": self._dev_pseudonym(serial)})
             self._start_session(serial)
+            self._ev("reconnect_result", "info", "Main", attempt_id=att, props={"outcome": "success"})
         else:
             delay = int(self.reconnect_delay.get())
             self._log(serial, "[i] Device nahi mila, %d s baad try..." % delay)
@@ -1259,6 +1559,7 @@ class PhoneMirrorApp:
                     sess.proc.terminate()
                 except Exception:  # noqa: BLE001
                     pass
+        self._ev("session_end", "info", "Main", props={"reason": "user_close"})
         self.root.destroy()
 
 
@@ -1269,6 +1570,7 @@ def main():
     except tk.TclError:
         pass
     app = PhoneMirrorApp(root)
+    root.report_callback_exception = app._tk_exception
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()
 

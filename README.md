@@ -104,14 +104,36 @@ App me **⚙ Diagnostics** button hai (neeche daayein). Yeh ek alag window kholt
 - **Preview** — current report (environment, scrcpy/adb version, devices, settings, log).
 - **Refresh** — report dobara banao. **Clean** — collected data + log clear karo.
 - **Copy report** — poora report clipboard me.
-- **Save as...** — format chuno: **txt, md, json, csv, xlsx** (Excel). Default jagah
+- **Save as...** — format chuno: **txt, md, json, jsonl, csv, xlsx** (Excel). Default jagah
   `~/Documents/PhoneMirror/`.
 - **Email (Gmail compose)** / **Email (mail app)** — **`br19shc39@gmail.com`** par
   compose khulta hai, To/Subject/Body pehle se bhare hue (summary + last 40 log lines).
   Poora report ek file me save hoke clipboard me bhi copy ho jaata hai — bas usse attach kar dena.
 - **Open folder** — exports ki folder kholo (attach karne me aasaan).
 
-`.xlsx` ke liye `openpyxl` chahiye (`pip install openpyxl`); na ho to CSV/TXT/MD/JSON use karo.
+`.xlsx` ke liye `openpyxl` chahiye (`pip install openpyxl`); na ho to CSV/TXT/MD/JSONL use karo.
+
+### Structured logging (ProGallery Logging Spec v1.0)
+
+Diagnostics ke andar ek **structured event log** bhi chalta hai, jo shared ProGallery standard
+follow karta hai (dekho [`docs/ProGallery_Logging_Spec.md`](docs/ProGallery_Logging_Spec.md)):
+
+- **Common envelope** — har event me `event_name`, `schema_version`, `timestamp` (ISO 8601 UTC),
+  `session_id`, `platform`, `app_version`, `os`, `device_model`, `screen_or_route`, `log_level`,
+  aur zaroorat par `attempt_id` / `network_type` / `release_channel`.
+- **Correlation ids** — `session_id` (har app launch par naya) aur `attempt_id`
+  (launch / reconnect jaise actions ko intent→outcome se jodta hai).
+- **Log levels** — `debug` / `info` / `warn` / `error`, deliberately.
+- **Sampling** — errors/warn 100%, info/debug sampled (rate configurable).
+- **Retention** — max events + 7 din (auto-purge).
+- **PII redaction** — email aur raw file paths log me kabhi nahi jaate (app + web ke liye same rules).
+- **Events** — `session_start`, `screen_view`, `device_state_resolved`, `device_refresh_result`,
+  `mirror_requested` / `mirror_result`, `reconnect_attempt` / `reconnect_result` / `reconnect_loop`,
+  `adb_command`, `export_saved`, `email_compose`, `error_state_shown`, `crash`, `session_end`.
+- **CI validation** — `logschema/validate_events.py --selftest` har build par events ko schema ke
+  against check karta hai; fail hone par build ruk jaata hai.
+- **Export** — `.jsonl` (ek event per line) ya `.json` (poore report me `events`), aur `.xlsx` me
+  alag "Events" sheet.
 
 ---
 

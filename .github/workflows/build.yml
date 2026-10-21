@@ -26,6 +26,9 @@ jobs:
       - name: Install PyInstaller
         run: pip install --upgrade pyinstaller openpyxl
 
+      - name: Validate logging schema (ProGallery spec)
+        run: python logschema/validate_events.py --selftest
+
       - name: Build EXE
         run: pyinstaller --onefile --noconsole --name PhoneMirror PhoneMirror.py
 

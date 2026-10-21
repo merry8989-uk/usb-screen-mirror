@@ -1,0 +1,95 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PhoneMirror structured event (ProGallery Logging Spec v1.0)",
+  "description": "Common event envelope (Part B of the ProGallery Logging Checklist & Event Schema). Event-specific properties are allowed on top.",
+  "type": "object",
+  "required": [
+    "event_name",
+    "schema_version",
+    "timestamp",
+    "session_id",
+    "platform",
+    "app_version",
+    "os",
+    "device_model",
+    "screen_or_route",
+    "log_level"
+  ],
+  "properties": {
+    "event_name": {
+      "type": "string",
+      "description": "object_action in snake_case, e.g. mirror_result",
+      "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
+    },
+    "schema_version": {
+      "type": "string",
+      "description": "bump on breaking change",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO 8601, UTC",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt_id": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string",
+      "description": "pseudonymous salted hash only"
+    },
+    "platform": {
+      "enum": [
+        "windows",
+        "linux",
+        "macos",
+        "web",
+        "android",
+        "ios"
+      ]
+    },
+    "app_version": {
+      "type": "string"
+    },
+    "os": {
+      "type": "string"
+    },
+    "device_model": {
+      "type": "string"
+    },
+    "network_type": {
+      "enum": [
+        "wifi",
+        "4g",
+        "5g",
+        "ethernet",
+        "offline",
+        "usb",
+        "unknown"
+      ]
+    },
+    "screen_or_route": {
+      "type": "string"
+    },
+    "log_level": {
+      "enum": [
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ]
+    },
+    "release_channel": {
+      "enum": [
+        "production",
+        "beta",
+        "dev"
+      ]
+    }
+  },
+  "additionalProperties": true
+}
