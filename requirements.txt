@@ -1,11 +1,16 @@
 # PhoneMirror - runtime dependencies
 #
-# Koi third-party runtime dependency nahi chahiye.
-# App sirf Python standard library (tkinter, subprocess, threading) use karta hai.
+# Core app ke liye koi third-party dependency zaroori nahi.
+# App zyadatar Python standard library use karta hai (tkinter, subprocess, threading).
+#
+# Optional:
+#   openpyxl  ->  diagnostics ka .xlsx (Excel) export ke liye.
+#                 Na ho to app CSV/TXT/MD/JSON export kar sakta hai.
+#                 pip install openpyxl
 #
 # Zaroori external tools (Python package nahi, system par install karo):
 #   scrcpy  ->  winget install Genymobile.scrcpy
 #   adb     ->  scrcpy ke saath aata hai (platform-tools)
 #
-# Sirf .exe build karne ke liye:
-#   pip install pyinstaller
+# .exe build karne ke liye (xlsx support ke saath):
+#   pip install pyinstaller openpyxl

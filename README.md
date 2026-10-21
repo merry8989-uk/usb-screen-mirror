@@ -95,6 +95,24 @@ Mouse = touch, keyboard = typing (scrcpy me default on). App se:
 Disconnect hone par app khud `adb` se check karke us device ka scrcpy dobara
 launch kar deta hai. Retry delay aur max attempts tunable.
 
+## Diagnostics (logs export + email)
+
+App me **⚙ Diagnostics** button hai (neeche daayein). Yeh ek alag window kholta hai jahan se:
+
+- **On/Off setting** — "Collect diagnostics" checkbox. **Default ON**. Off karne par app
+  koi log/technical data collect nahi karti (setting yaad rehti hai).
+- **Preview** — current report (environment, scrcpy/adb version, devices, settings, log).
+- **Refresh** — report dobara banao. **Clean** — collected data + log clear karo.
+- **Copy report** — poora report clipboard me.
+- **Save as...** — format chuno: **txt, md, json, csv, xlsx** (Excel). Default jagah
+  `~/Documents/PhoneMirror/`.
+- **Email (Gmail compose)** / **Email (mail app)** — **`br19shc39@gmail.com`** par
+  compose khulta hai, To/Subject/Body pehle se bhare hue (summary + last 40 log lines).
+  Poora report ek file me save hoke clipboard me bhi copy ho jaata hai — bas usse attach kar dena.
+- **Open folder** — exports ki folder kholo (attach karne me aasaan).
+
+`.xlsx` ke liye `openpyxl` chahiye (`pip install openpyxl`); na ho to CSV/TXT/MD/JSON use karo.
+
 ---
 
 # Mode B — Standalone (APK + receiver)

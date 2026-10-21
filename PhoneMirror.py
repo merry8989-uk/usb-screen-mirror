@@ -10,10 +10,13 @@ Features:
   * Camera mirroring: phone ka camera PC par (scrcpy 2.2+)
   * Low-latency presets, clear audio (Opus), input control
   * Auto-reconnect per device
+  * Diagnostics: technical data + logs export (.txt/.md/.json/.csv/.xlsx),
+    email compose (pre-filled), copy, refresh, clean. On/off setting (default ON).
 
 Yeh scrcpy ka engine use karta hai (hardware encode + USB transport).
 
 Sirf Python 3 + scrcpy + adb chahiye. Tkinter Python ke saath aata hai.
+(.xlsx export ke liye optional: pip install openpyxl)
 
 Run:  python PhoneMirror.py
 """
@@ -21,17 +24,50 @@ Run:  python PhoneMirror.py
 import os
 import re
 import sys
+import csv
+import json
 import time
 import shutil
+import platform
+import datetime
 import subprocess
 import threading
 import queue
+import webbrowser
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+from urllib.parse import quote
 
 APP_TITLE = "PhoneMirror  -  Screen Mirror (scrcpy wrapper)"
+APP_VERSION = "1.4.0"
+DIAG_EMAIL = "br19shc39@gmail.com"
+
 IS_WINDOWS = (os.name == "nt")
 CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
+
+CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".phonemirror")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+
+
+# --------------------------------------------------------------------------- #
+#  Config persistence (diagnostics on/off yaad rakhne ke liye)
+# --------------------------------------------------------------------------- #
+def load_config():
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def save_config(cfg):
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -161,7 +197,6 @@ def build_command(scrcpy_path, serial, s):
         cmd += ["--serial", serial]
         cmd += ["--window-title", "PhoneMirror - %s" % serial]
 
-    # --- video source ---
     src = s.get("video_source", "display")
     if src == "camera":
         cmd += ["--video-source", "camera"]
@@ -177,7 +212,6 @@ def build_command(scrcpy_path, serial, s):
     cmd += ["--video-buffer", "0", "--display-buffer", "0"]
     cmd += ["--render-driver", "opengl"]
 
-    # --- audio ---
     if s.get("audio"):
         cmd += ["--audio-codec", s.get("audio_codec", "opus")]
         cmd += ["--audio-bit-rate", s.get("audio_bitrate", "128K")]
@@ -185,11 +219,9 @@ def build_command(scrcpy_path, serial, s):
     else:
         cmd += ["--no-audio"]
 
-    # --- recording ---
     if s.get("record") and s.get("record_path"):
         cmd += ["--record", s["record_path"]]
 
-    # --- input control ---
     if s.get("no_control"):
         cmd += ["--no-control"]
     else:
@@ -208,6 +240,157 @@ def build_command(scrcpy_path, serial, s):
     return cmd
 
 
+# --------------------------------------------------------------------------- #
+#  Diagnostics report rendering
+# --------------------------------------------------------------------------- #
+def render_txt(rep):
+    L = []
+    L.append("PhoneMirror diagnostics report")
+    L.append("Generated: %s" % rep["generated_at"])
+    L.append("App: %s v%s" % (rep["app"]["name"], rep["app"]["version"]))
+    L.append("Diagnostics collection: %s" % ("ON" if rep["diagnostics_enabled"] else "OFF"))
+    L.append("")
+    L.append("== Environment ==")
+    for k, v in rep["environment"].items():
+        L.append("  %-10s %s" % (k + ":", v))
+    L.append("")
+    L.append("== Tools ==")
+    for k, v in rep["tools"].items():
+        L.append("  %-16s %s" % (k + ":", v))
+    L.append("")
+    L.append("== Devices (%d) ==" % len(rep["devices"]))
+    for d in rep["devices"]:
+        L.append("  %s   [%s]   %s" % (d["serial"], d["state"], d["model"]))
+    L.append("")
+    L.append("== Settings ==")
+    for k, v in rep["settings"].items():
+        L.append("  %-18s %s" % (k + ":", v))
+    L.append("")
+    L.append("== Log (%d lines) ==" % len(rep["log"]))
+    if not rep["log"]:
+        L.append("  (kuch nahi - diagnostics OFF ho sakta hai)")
+    for e in rep["log"]:
+        pref = ("[%s] " % e["serial"]) if e.get("serial") else ""
+        L.append("  %s  %s%s" % (e["time"], pref, e["text"]))
+    return "\n".join(L)
+
+
+def render_md(rep):
+    L = []
+    L.append("# PhoneMirror diagnostics report")
+    L.append("")
+    L.append("- **Generated:** %s" % rep["generated_at"])
+    L.append("- **App:** %s v%s" % (rep["app"]["name"], rep["app"]["version"]))
+    L.append("- **Diagnostics:** %s" % ("ON" if rep["diagnostics_enabled"] else "OFF"))
+    L.append("")
+    L.append("## Environment")
+    L.append("")
+    L.append("| Key | Value |")
+    L.append("|---|---|")
+    for k, v in rep["environment"].items():
+        L.append("| %s | %s |" % (k, v))
+    L.append("")
+    L.append("## Tools")
+    L.append("")
+    L.append("| Key | Value |")
+    L.append("|---|---|")
+    for k, v in rep["tools"].items():
+        L.append("| %s | %s |" % (k, str(v).replace("|", "/")))
+    L.append("")
+    L.append("## Devices (%d)" % len(rep["devices"]))
+    L.append("")
+    L.append("| Serial | State | Model |")
+    L.append("|---|---|---|")
+    for d in rep["devices"]:
+        L.append("| %s | %s | %s |" % (d["serial"], d["state"], d["model"]))
+    L.append("")
+    L.append("## Settings")
+    L.append("")
+    L.append("| Setting | Value |")
+    L.append("|---|---|")
+    for k, v in rep["settings"].items():
+        L.append("| %s | %s |" % (k, v))
+    L.append("")
+    L.append("## Log (%d lines)" % len(rep["log"]))
+    L.append("")
+    L.append("```")
+    for e in rep["log"]:
+        pref = ("[%s] " % e["serial"]) if e.get("serial") else ""
+        L.append("%s  %s%s" % (e["time"], pref, e["text"]))
+    L.append("```")
+    return "\n".join(L)
+
+
+def render_email_body(rep, attach_path, max_lines=40, limit=1800):
+    lines = [
+        "PhoneMirror diagnostics report",
+        "Generated: %s" % rep["generated_at"],
+        "App: %s v%s" % (rep["app"]["name"], rep["app"]["version"]),
+        "Diagnostics: %s" % ("ON" if rep["diagnostics_enabled"] else "OFF"),
+        "",
+        "OS: %s" % rep["environment"].get("os", ""),
+        "Python: %s" % rep["environment"].get("python", ""),
+        "scrcpy: %s" % rep["tools"].get("scrcpy_version", ""),
+        "adb: %s" % rep["tools"].get("adb_version", ""),
+        "Devices: %d" % len(rep["devices"]),
+        "",
+        "--- Log (last %d lines) ---" % max_lines,
+    ]
+    for e in rep["log"][-max_lines:]:
+        pref = ("[%s] " % e["serial"]) if e.get("serial") else ""
+        lines.append("%s %s%s" % (e["time"], pref, e["text"]))
+    lines.append("")
+    lines.append("(Poora report file attach kiya gaya hai: %s)" % os.path.basename(attach_path))
+    body = "\n".join(lines)
+    if len(body) > limit:
+        body = body[:limit] + "\n...(truncated - poora report file me hai)"
+    return body
+
+
+def write_xlsx(rep, path):
+    """xlsx likho. openpyxl chahiye. Raises ImportError agar nahi hai."""
+    from openpyxl import Workbook  # noqa: WPS433
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(["Field", "Value"])
+    ws.append(["Generated", rep["generated_at"]])
+    ws.append(["App", "%s v%s" % (rep["app"]["name"], rep["app"]["version"])])
+    ws.append(["Diagnostics", "ON" if rep["diagnostics_enabled"] else "OFF"])
+    for k, v in rep["environment"].items():
+        ws.append(["env." + k, str(v)])
+    for k, v in rep["tools"].items():
+        ws.append(["tool." + k, str(v)])
+
+    dev = wb.create_sheet("Devices")
+    dev.append(["Serial", "State", "Model"])
+    for d in rep["devices"]:
+        dev.append([d["serial"], d["state"], d["model"]])
+
+    st = wb.create_sheet("Settings")
+    st.append(["Setting", "Value"])
+    for k, v in rep["settings"].items():
+        st.append([k, str(v)])
+
+    lg = wb.create_sheet("Log")
+    lg.append(["Time", "Serial", "Message"])
+    for e in rep["log"]:
+        lg.append([e["time"], e.get("serial", ""), e["text"]])
+
+    wb.save(path)
+
+
+def write_csv(rep, path):
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["time", "serial", "message"])
+        for e in rep["log"]:
+            w.writerow([e["time"], e.get("serial", ""), e["text"]])
+
+
+# --------------------------------------------------------------------------- #
+#  Session
+# --------------------------------------------------------------------------- #
 class Session:
     """Ek device ka mirroring session."""
 
@@ -225,7 +408,124 @@ class Session:
 
 
 # --------------------------------------------------------------------------- #
-#  GUI
+#  Diagnostics window
+# --------------------------------------------------------------------------- #
+class DiagnosticsWindow(tk.Toplevel):
+    def __init__(self, app):
+        super().__init__(app.root)
+        self.app = app
+        self.title("Diagnostics  -  PhoneMirror")
+        self.minsize(760, 600)
+        self._last_path = None
+
+        pad = {"padx": 8, "pady": 4}
+
+        top = ttk.LabelFrame(self, text="Settings")
+        top.pack(fill="x", **pad)
+        ttk.Checkbutton(top, text="Collect diagnostics (logs + technical data)  -  default ON",
+                        variable=app.diag_enabled, command=self._toggle).grid(
+            row=0, column=0, sticky="w", padx=6, pady=6)
+        ttk.Label(top, text="Off karne par app koi data collect nahi karegi (export sirf summary dega).",
+                  foreground="#666").grid(row=1, column=0, sticky="w", padx=8, pady=(0, 6))
+
+        self.preview = tk.Text(self, height=18, wrap="none", bg="#111", fg="#d0d0d0",
+                               insertbackground="#d0d0d0", font=("Consolas", 9))
+        self.preview.pack(fill="both", expand=True, padx=8, pady=4)
+        self.preview.configure(state="disabled")
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", **pad)
+        ttk.Button(bar, text="Refresh", command=self.refresh).pack(side="left", padx=3)
+        ttk.Button(bar, text="Clean", command=self.clean).pack(side="left", padx=3)
+        ttk.Button(bar, text="Copy report", command=self.copy).pack(side="left", padx=3)
+
+        ttk.Label(bar, text="Format:").pack(side="left", padx=(16, 4))
+        self.fmt = tk.StringVar(value="txt")
+        ttk.Combobox(bar, textvariable=self.fmt, state="readonly", width=7,
+                     values=["txt", "md", "json", "csv", "xlsx"]).pack(side="left")
+        ttk.Button(bar, text="Save as...", command=self.save_as).pack(side="left", padx=6)
+
+        bar2 = ttk.Frame(self)
+        bar2.pack(fill="x", **pad)
+        ttk.Button(bar2, text="\u2709  Email (Gmail compose)", command=lambda: self.email(True)).pack(side="left", padx=3)
+        ttk.Button(bar2, text="\u2709  Email (mail app)", command=lambda: self.email(False)).pack(side="left", padx=3)
+        ttk.Button(bar2, text="Open folder", command=self.open_folder).pack(side="left", padx=3)
+        ttk.Label(bar2, text="Email: %s" % DIAG_EMAIL, foreground="#666").pack(side="right", padx=6)
+
+        self.status = ttk.Label(self, text="", anchor="w", relief="sunken")
+        self.status.pack(fill="x", side="bottom")
+
+        self.refresh()
+
+    def _toggle(self):
+        self.app.set_diag_enabled(self.app.diag_enabled.get())
+        self.status.configure(text="Diagnostics %s." % ("ON" if self.app.diag_enabled.get() else "OFF"))
+        self.refresh()
+
+    def _render(self):
+        rep = self.app.build_report()
+        return render_txt(rep), rep
+
+    def refresh(self):
+        text, _ = self._render()
+        self.preview.configure(state="normal")
+        self.preview.delete("1.0", "end")
+        self.preview.insert("end", text)
+        self.preview.configure(state="disabled")
+        self.status.configure(text="Report refreshed (%d log lines)." % len(self.app.diag))
+
+    def clean(self):
+        if not messagebox.askyesno("Clean", "Diagnostics log aur collected data clear kar dun?"):
+            return
+        self.app.clean_diagnostics()
+        self.refresh()
+        self.status.configure(text="Diagnostics data clear ho gaya.")
+
+    def copy(self):
+        text, _ = self._render()
+        self.app.root.clipboard_clear()
+        self.app.root.clipboard_append(text)
+        self.status.configure(text="Poora report clipboard me copy ho gaya.")
+
+    def save_as(self):
+        fmt = self.fmt.get()
+        ext = "." + fmt
+        path = filedialog.asksaveasfilename(
+            title="Diagnostics report save karo", defaultextension=ext,
+            initialfile="PhoneMirror_diagnostics_%s%s" % (time.strftime("%Y%m%d_%H%M%S"), ext),
+            filetypes=[(fmt.upper(), "*" + ext), ("All", "*.*")])
+        if not path:
+            return
+        _, rep = self._render()
+        try:
+            self.app.save_report(rep, path, fmt)
+            self._last_path = path
+            self.status.configure(text="Saved: %s" % path)
+            self.app._log(None, "[i] Diagnostics saved: %s" % path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Save fail", str(exc))
+
+    def email(self, gmail):
+        try:
+            path = self.app.email_report(gmail)
+            self._last_path = path
+            self.status.configure(text="Email compose khula. Report: %s" % path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Email fail", str(exc))
+
+    def open_folder(self):
+        d = self.app.diagnostics_dir()
+        try:
+            if IS_WINDOWS:
+                os.startfile(d)  # noqa: S606
+            else:
+                webbrowser.open("file://" + d)
+        except Exception:  # noqa: BLE001
+            messagebox.showinfo("Folder", d)
+
+
+# --------------------------------------------------------------------------- #
+#  Main app
 # --------------------------------------------------------------------------- #
 class PhoneMirrorApp:
     def __init__(self, root):
@@ -233,11 +533,17 @@ class PhoneMirrorApp:
         self.root.title(APP_TITLE)
         self.root.minsize(880, 820)
 
+        cfg = load_config()
         self.log_q = queue.Queue()
         self.devices = []
-        self.sessions = {}   # serial -> Session
+        self.sessions = {}
+        self.diag = []                      # collected diagnostics entries
+        self._diag_win = None
         self.scrcpy_path = tk.StringVar(value=find_executable("scrcpy") or "")
         self.adb_path = tk.StringVar(value=find_executable("adb") or "")
+
+        # diagnostics on/off (default ON, persisted)
+        self.diag_enabled = tk.BooleanVar(value=bool(cfg.get("diagnostics_enabled", True)))
 
         # connection
         self.connection_mode = tk.StringVar(value="usb")
@@ -287,7 +593,6 @@ class PhoneMirrorApp:
     def _build_ui(self):
         pad = {"padx": 8, "pady": 3}
 
-        # 1. Tools
         paths = ttk.LabelFrame(self.root, text="1. Tools (scrcpy / adb)")
         paths.pack(fill="x", **pad)
         ttk.Label(paths, text="scrcpy:").grid(row=0, column=0, sticky="w", padx=6, pady=3)
@@ -298,7 +603,6 @@ class PhoneMirrorApp:
         ttk.Button(paths, text="Browse", command=self._browse_adb).grid(row=1, column=2, padx=6)
         paths.columnconfigure(1, weight=1)
 
-        # 2. Device (multi-select)
         dev = ttk.LabelFrame(self.root, text="2. Device  (multi-select: Ctrl / Shift + click)")
         dev.pack(fill="x", **pad)
         self.device_list = tk.Listbox(dev, selectmode="extended", height=4, exportselection=False)
@@ -311,7 +615,6 @@ class PhoneMirrorApp:
         self.device_status.grid(row=1, column=0, columnspan=3, sticky="w", padx=8)
         dev.columnconfigure(0, weight=1)
 
-        # 3. Connection
         conn = ttk.LabelFrame(self.root, text="3. Connection (USB / Wi-Fi)")
         conn.pack(fill="x", **pad)
         ttk.Radiobutton(conn, text="USB cable  (lowest latency)", value="usb",
@@ -326,10 +629,7 @@ class PhoneMirrorApp:
         ttk.Button(conn, text="Enable Wi-Fi", command=self.enable_wifi).grid(row=3, column=0, padx=6, pady=(0, 4), sticky="w")
         ttk.Button(conn, text="Connect", command=self.connect_wifi).grid(row=3, column=1, padx=6, pady=(0, 4), sticky="w")
         ttk.Button(conn, text="Disconnect", command=self.disconnect_wifi).grid(row=3, column=2, padx=6, pady=(0, 4), sticky="w")
-        ttk.Label(conn, text="Wi-Fi: USB se jodo -> 'Enable Wi-Fi' -> cable nikaalo -> 'Connect'.",
-                  foreground="#666").grid(row=4, column=0, columnspan=5, sticky="w", padx=8, pady=(0, 4))
 
-        # 4. Preset
         pre = ttk.LabelFrame(self.root, text="4. Preset")
         pre.pack(fill="x", **pad)
         for i, name in enumerate(PRESETS):
@@ -340,10 +640,8 @@ class PhoneMirrorApp:
                                      wraplength=800, foreground="#444")
         self.preset_desc.grid(row=1, column=0, columnspan=len(PRESETS), sticky="w", padx=8, pady=(0, 4))
 
-        # 5. Video
         tun = ttk.LabelFrame(self.root, text="5. Video")
         tun.pack(fill="x", **pad)
-
         srcrow = ttk.Frame(tun)
         srcrow.grid(row=0, column=0, columnspan=4, sticky="w", padx=6, pady=(4, 0))
         ttk.Label(srcrow, text="Source:").pack(side="left")
@@ -351,27 +649,21 @@ class PhoneMirrorApp:
                         command=self._on_source).pack(side="left", padx=(8, 0))
         ttk.Radiobutton(srcrow, text="Camera", value="camera", variable=self.video_source,
                         command=self._on_source).pack(side="left", padx=(8, 0))
-
         ttk.Label(tun, text="Max size (px):").grid(row=1, column=0, sticky="w", padx=6, pady=3)
         self.size_scale = ttk.Scale(tun, from_=480, to=2560, variable=self.max_size,
                                     orient="horizontal", command=self._on_size)
         self.size_scale.grid(row=1, column=1, sticky="we", padx=6)
         self.size_lbl = ttk.Label(tun, text="1024", width=6)
         self.size_lbl.grid(row=1, column=2, sticky="w")
-
         ttk.Label(tun, text="Bitrate:").grid(row=2, column=0, sticky="w", padx=6, pady=3)
         ttk.Combobox(tun, textvariable=self.bitrate, state="readonly", width=10,
                      values=["2M", "4M", "6M", "8M", "12M", "16M", "24M"]).grid(row=2, column=1, sticky="w", padx=6)
-
         ttk.Label(tun, text="Max FPS:").grid(row=3, column=0, sticky="w", padx=6, pady=3)
         ttk.Combobox(tun, textvariable=self.max_fps, state="readonly", width=10,
                      values=[15, 30, 45, 60, 90, 120]).grid(row=3, column=1, sticky="w", padx=6)
-
         ttk.Label(tun, text="Codec:").grid(row=4, column=0, sticky="w", padx=6, pady=3)
         ttk.Combobox(tun, textvariable=self.codec, state="readonly", width=10,
                      values=["h264", "h265", "av1"]).grid(row=4, column=1, sticky="w", padx=6)
-
-        # camera options
         cam = ttk.Frame(tun)
         cam.grid(row=1, column=3, rowspan=2, sticky="nw", padx=16)
         ttk.Label(cam, text="Camera facing:").grid(row=0, column=0, sticky="e", padx=(0, 4))
@@ -383,7 +675,6 @@ class PhoneMirrorApp:
         ttk.Label(cam, text="Camera FPS:").grid(row=2, column=0, sticky="e", padx=(0, 4), pady=(4, 0))
         ttk.Combobox(cam, textvariable=self.camera_fps, state="readonly", width=9,
                      values=[15, 24, 30, 60]).grid(row=2, column=1, sticky="w", pady=(4, 0))
-
         vopts = ttk.Frame(tun)
         vopts.grid(row=3, column=3, rowspan=2, sticky="nw", padx=16)
         ttk.Checkbutton(vopts, text="Turn phone screen off", variable=self.turn_screen_off).pack(anchor="w")
@@ -392,7 +683,6 @@ class PhoneMirrorApp:
         ttk.Checkbutton(vopts, text="Print FPS (debug)", variable=self.print_fps).pack(anchor="w")
         tun.columnconfigure(1, weight=1)
 
-        # 6. Audio
         aud = ttk.LabelFrame(self.root, text="6. Audio")
         aud.pack(fill="x", **pad)
         ttk.Checkbutton(aud, text="Audio on (clear)", variable=self.audio).grid(row=0, column=0, sticky="w", padx=6, pady=4)
@@ -406,7 +696,6 @@ class PhoneMirrorApp:
         ttk.Combobox(aud, textvariable=self.audio_buffer, state="readonly", width=6,
                      values=[0, 25, 50, 100, 150, 200]).grid(row=0, column=6, sticky="w", padx=(0, 6))
 
-        # 7. Recording
         rec = ttk.LabelFrame(self.root, text="7. Recording")
         rec.pack(fill="x", **pad)
         ttk.Checkbutton(rec, text="Record session to file", variable=self.record).grid(
@@ -414,11 +703,7 @@ class PhoneMirrorApp:
         ttk.Entry(rec, textvariable=self.record_path, width=52).grid(row=0, column=1, sticky="we", padx=6)
         ttk.Button(rec, text="Save as...", command=self._browse_record).grid(row=0, column=2, padx=6)
         rec.columnconfigure(1, weight=1)
-        ttk.Label(rec, text="Khali chhodne par ~/Videos me PhoneMirror_<serial>_<time>.mp4 banegi. "
-                            "Multi-device par file naam me serial khud jud jaata hai.",
-                  foreground="#666").grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
-        # 8. Auto-reconnect
         rc = ttk.LabelFrame(self.root, text="8. Auto-reconnect (per device)")
         rc.pack(fill="x", **pad)
         ttk.Checkbutton(rc, text="Auto-reconnect on disconnect", variable=self.auto_reconnect).grid(
@@ -428,7 +713,6 @@ class PhoneMirrorApp:
         ttk.Label(rc, text="Max attempts (0 = unlimited):").grid(row=0, column=3, sticky="e", padx=(16, 4))
         ttk.Spinbox(rc, from_=0, to=1000, textvariable=self.reconnect_max, width=6).grid(row=0, column=4, sticky="w", padx=(0, 6))
 
-        # 9. Input control
         ctl = ttk.LabelFrame(self.root, text="9. Input control (PC se phone chalao)")
         ctl.pack(fill="x", **pad)
         ttk.Checkbutton(ctl, text="No control (sirf dekho)", variable=self.no_control).grid(
@@ -436,19 +720,16 @@ class PhoneMirrorApp:
         ttk.Label(ctl, text="Keyboard mode:").grid(row=0, column=1, sticky="e", padx=(16, 4))
         ttk.Combobox(ctl, textvariable=self.keyboard_mode, state="readonly", width=10,
                      values=["default", "uhid", "sdk", "disabled"]).grid(row=0, column=2, sticky="w")
-        ttk.Label(ctl, text="Mouse = touch, keyboard = typing (default on). uhid = Android 11+ best.",
-                  foreground="#666").grid(row=1, column=0, columnspan=3, sticky="w", padx=8, pady=(0, 4))
 
-        # actions
         act = ttk.Frame(self.root)
         act.pack(fill="x", **pad)
         self.launch_btn = ttk.Button(act, text="\u25b6  Start Mirroring", command=self.launch)
         self.launch_btn.pack(side="left", padx=4)
         self.stop_btn = ttk.Button(act, text="\u25a0  Stop All", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=4)
-        ttk.Button(act, text="Copy command(s)", command=self.copy_command).pack(side="right", padx=4)
+        ttk.Button(act, text="Copy command(s)", command=self.copy_command).pack(side="left", padx=4)
+        ttk.Button(act, text="\u2699  Diagnostics", command=self.open_diagnostics).pack(side="right", padx=4)
 
-        # log
         logf = ttk.LabelFrame(self.root, text="Log")
         logf.pack(fill="both", expand=True, **pad)
         self.log = tk.Text(logf, height=8, wrap="word", bg="#111", fg="#d0d0d0",
@@ -467,8 +748,7 @@ class PhoneMirrorApp:
 
     def _on_source(self):
         cam = (self.video_source.get() == "camera")
-        state = "normal" if not cam else "disabled"
-        self.size_scale.configure(state=state)
+        self.size_scale.configure(state="disabled" if cam else "normal")
 
     def _browse_scrcpy(self):
         p = filedialog.askopenfilename(title="scrcpy.exe chuno",
@@ -496,6 +776,15 @@ class PhoneMirrorApp:
         self.log.insert("end", prefix + text + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
+        # diagnostics collection
+        if self.diag_enabled.get():
+            self.diag.append({
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                "serial": serial or "",
+                "text": text,
+            })
+            if len(self.diag) > 5000:
+                del self.diag[:1000]
 
     def _adb(self):
         adb = self.adb_path.get().strip()
@@ -505,6 +794,133 @@ class PhoneMirrorApp:
                 self.adb_path.set(adb)
         return adb
 
+    # ---------------- diagnostics ----------------
+    def set_diag_enabled(self, value):
+        self.diag_enabled.set(bool(value))
+        cfg = load_config()
+        cfg["diagnostics_enabled"] = bool(value)
+        save_config(cfg)
+
+    def clean_diagnostics(self):
+        self.diag = []
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
+    def diagnostics_dir(self):
+        home = os.path.expanduser("~")
+        docs = os.path.join(home, "Documents")
+        d = os.path.join(docs, "PhoneMirror") if os.path.isdir(docs) else os.path.join(home, "PhoneMirror")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            d = home
+        return d
+
+    def build_report(self):
+        scrcpy = self._resolve_scrcpy()
+        scrcpy_ver = ""
+        if scrcpy:
+            try:
+                out = subprocess.run([scrcpy, "--version"], capture_output=True, text=True,
+                                     timeout=10, creationflags=CREATE_NO_WINDOW).stdout.strip()
+                scrcpy_ver = out.splitlines()[0] if out else ""
+            except Exception as exc:  # noqa: BLE001
+                scrcpy_ver = "error: %s" % exc
+
+        adb = self._adb()
+        adb_ver = ""
+        devices = []
+        if adb:
+            ok, out = run_adb(adb, ["version"])
+            adb_ver = out.splitlines()[0] if out else ""
+            devs, _ = list_devices(adb)
+            devices = [{"serial": d["serial"], "state": d["state"], "model": d["model"]} for d in devs]
+
+        return {
+            "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+            "app": {"name": "PhoneMirror", "version": APP_VERSION},
+            "diagnostics_enabled": bool(self.diag_enabled.get()),
+            "environment": {
+                "os": platform.platform(),
+                "system": platform.system(),
+                "release": platform.release(),
+                "machine": platform.machine(),
+                "python": sys.version.split()[0],
+            },
+            "tools": {
+                "scrcpy_path": scrcpy or "",
+                "scrcpy_version": scrcpy_ver,
+                "adb_path": adb or "",
+                "adb_version": adb_ver,
+            },
+            "devices": devices,
+            "settings": self.current_settings(),
+            "log": list(self.diag),
+        }
+
+    def save_report(self, rep, path, fmt):
+        fmt = (fmt or "txt").lower().lstrip(".")
+        if fmt == "txt":
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(render_txt(rep))
+        elif fmt == "md":
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(render_md(rep))
+        elif fmt == "json":
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(rep, f, indent=2, ensure_ascii=False)
+        elif fmt == "csv":
+            write_csv(rep, path)
+        elif fmt == "xlsx":
+            try:
+                write_xlsx(rep, path)
+            except ImportError:
+                raise RuntimeError("xlsx ke liye openpyxl chahiye.\n\nInstall: pip install openpyxl\n"
+                                   "(ya CSV/TXT format use karo)")
+        else:
+            raise RuntimeError("Unknown format: %s" % fmt)
+
+    def email_report(self, gmail=True):
+        rep = self.build_report()
+        d = self.diagnostics_dir()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(d, "PhoneMirror_diagnostics_%s.md" % ts)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(render_md(rep))
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("Report save nahi hui: %s" % exc)
+
+        body = render_email_body(rep, path)
+        subj = "PhoneMirror diagnostics report - %s" % rep["generated_at"]
+
+        # clipboard me poora report (backup)
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(render_txt(rep))
+        except Exception:  # noqa: BLE001
+            pass
+
+        if gmail:
+            url = ("https://mail.google.com/mail/?view=cm&fs=1&to=%s&su=%s&body=%s"
+                   % (quote(DIAG_EMAIL), quote(subj), quote(body)))
+        else:
+            url = "mailto:%s?subject=%s&body=%s" % (DIAG_EMAIL, quote(subj), quote(body))
+        webbrowser.open(url)
+
+        self._log(None, "[i] Email compose khula -> %s (report: %s)" % (DIAG_EMAIL, path))
+        self.status.configure(text="Email compose khula. Report file: %s" % path)
+        return path
+
+    def open_diagnostics(self):
+        if self._diag_win is not None and self._diag_win.winfo_exists():
+            self._diag_win.lift()
+            self._diag_win.refresh()
+            return
+        self._diag_win = DiagnosticsWindow(self)
+
+    # ---------------- presets / settings ----------------
     def apply_preset(self, name):
         p = PRESETS[name]
         self.max_size.set(p["max_size"])
@@ -534,12 +950,17 @@ class PhoneMirrorApp:
             "audio_bitrate": self.audio_bitrate.get(),
             "audio_buffer": int(self.audio_buffer.get()),
             "record": self.record.get(),
+            "record_path": self.record_path.get(),
             "no_control": self.no_control.get(),
             "keyboard_mode": self.keyboard_mode.get(),
             "turn_screen_off": self.turn_screen_off.get(),
             "stay_awake": self.stay_awake.get(),
             "always_on_top": self.always_on_top.get(),
             "print_fps": self.print_fps.get(),
+            "auto_reconnect": self.auto_reconnect.get(),
+            "reconnect_delay": int(self.reconnect_delay.get()),
+            "reconnect_max": int(self.reconnect_max.get()),
+            "connection_mode": self.connection_mode.get(),
         }
 
     def selected_serials(self):
@@ -628,8 +1049,7 @@ class PhoneMirrorApp:
     def refresh_devices(self):
         adb = self._adb()
         if not adb:
-            self.device_status.configure(text="adb nahi mila. Upar path set karo.",
-                                         foreground="#b00")
+            self.device_status.configure(text="adb nahi mila. Upar path set karo.", foreground="#b00")
             self._log(None, "[!] adb nahi mila.")
             return
 
@@ -662,7 +1082,7 @@ class PhoneMirrorApp:
             self.device_status.configure(text="%d device ready. Multi-select kar sakte ho." % len(ready),
                                          foreground="#080")
         elif self.devices:
-            self.device_status.configure(text="Device unauthorized/offline. Phone par USB debugging allow karo.",
+            self.device_status.configure(text="Device unauthorized/offline. USB debugging allow karo.",
                                          foreground="#b60")
         else:
             self.device_status.configure(text="Koi device nahi mila.", foreground="#b60")
@@ -704,7 +1124,6 @@ class PhoneMirrorApp:
         if not serials:
             messagebox.showwarning("Device nahi", "Pehle device select karo (Ctrl/Shift + click).")
             return
-
         for serial in serials:
             sess = self.sessions.get(serial) or Session(serial)
             self.sessions[serial] = sess

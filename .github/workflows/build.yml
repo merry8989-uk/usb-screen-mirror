@@ -24,7 +24,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install PyInstaller
-        run: pip install --upgrade pyinstaller
+        run: pip install --upgrade pyinstaller openpyxl
 
       - name: Build EXE
         run: pyinstaller --onefile --noconsole --name PhoneMirror PhoneMirror.py
