@@ -146,23 +146,31 @@ Diagnostics ON hone par app logs **disk par continuously** likhti rehti hai:
 
 `.xlsx` ke liye `openpyxl` chahiye (`pip install openpyxl`); na ho to CSV/TXT/MD/JSONL use karo.
 
-### Structured logging (ProGallery Logging Spec v1.0)
+### Structured logging (ProGallery spec + log taxonomy)
 
-Diagnostics ke andar ek **structured event log** bhi chalta hai, jo shared ProGallery standard
-follow karta hai (dekho [`docs/ProGallery_Logging_Spec.md`](docs/ProGallery_Logging_Spec.md)):
+Diagnostics ke andar ek **structured event log** chalta hai, jo shared ProGallery standard aur
+log taxonomy follow karta hai (dekho [`docs/ProGallery_Logging_Spec.md`](docs/ProGallery_Logging_Spec.md)
++ [`docs/Log_Types_and_Severity.md`](docs/Log_Types_and_Severity.md)):
 
 - **Common envelope** — har event me `event_name`, `schema_version`, `timestamp` (ISO 8601 UTC),
-  `session_id`, `platform`, `app_version`, `os`, `device_model`, `screen_or_route`, `log_level`,
-  aur zaroorat par `attempt_id` / `network_type` / `release_channel`.
+  `session_id`, `app_id`, `app_version`, `environment`, `platform`, `os`, `device_model`,
+  `screen_or_route`, `log_level`, `severity`, `category`, `message`, aur zaroorat par
+  `attempt_id` / `request_id` / `network_type` / `release_channel`.
 - **Correlation ids** — `session_id` (har app launch par naya) aur `attempt_id`
   (launch / reconnect jaise actions ko intent→outcome se jodta hai).
-- **Log levels** — `debug` / `info` / `warn` / `error`, deliberately.
-- **Sampling** — errors/warn 100%, info/debug sampled (rate configurable).
+- **Categories (12)** — `application`, `error`, `security`, `performance`, `user_activity`,
+  `infrastructure`, `api_network`, `database`, `audit`, `analytics`, `background_job`, `debug_trace`.
+  App in me se **10 applicable** categories emit karti hai (`database` / `analytics` is app me nahi).
+- **Severities (6)** — `trace` / `debug` / `info` / `warn` / `error` / `fatal`, deliberately.
+- **Sampling** — warn/error/fatal 100%, trace/debug/info sampled (rate configurable).
 - **Retention** — max events + 7 din (auto-purge).
 - **PII redaction** — email aur raw file paths log me kabhi nahi jaate (app + web ke liye same rules).
-- **Events** — `session_start`, `screen_view`, `device_state_resolved`, `device_refresh_result`,
+- **Events** — `session_start`, `environment_snapshot`, `screen_view`, `preset_applied`,
+  `device_state_resolved`, `device_refresh_result`, `device_authorization_failed` (security),
   `mirror_requested` / `mirror_result`, `reconnect_attempt` / `reconnect_result` / `reconnect_loop`,
-  `adb_command`, `export_saved`, `email_compose`, `error_state_shown`, `crash`, `session_end`.
+  `adb_command`, `performance_marker`, `settings_changed`, `diagnostics_toggled`,
+  `diagnostics_cleaned`, `export_saved`, `email_compose`, `share_bundle`, `tool_probe`,
+  `error_state_shown`, `crash`, `queue_drain`, `session_end`.
 - **CI validation** — `logschema/validate_events.py --selftest` har build par events ko schema ke
   against check karta hai; fail hone par build ruk jaata hai.
 - **Export** — `.jsonl` (ek event per line) ya `.json` (poore report me `events`), aur `.xlsx` me

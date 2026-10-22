@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "PhoneMirror structured event (ProGallery Logging Spec v1.0)",
-  "description": "Common event envelope (Part B of the ProGallery Logging Checklist & Event Schema). Event-specific properties are allowed on top.",
+  "title": "PhoneMirror structured event",
+  "description": "Common event envelope. Combines the ProGallery Logging Spec v1.0 envelope with the log taxonomy (12 categories) and 6 severity levels (trace..fatal). Event-specific properties are allowed on top.",
   "type": "object",
   "required": [
     "event_name",
@@ -13,7 +13,11 @@
     "os",
     "device_model",
     "screen_or_route",
-    "log_level"
+    "log_level",
+    "severity",
+    "category",
+    "app_id",
+    "environment"
   ],
   "properties": {
     "event_name": {
@@ -38,6 +42,10 @@
     "attempt_id": {
       "type": "string"
     },
+    "request_id": {
+      "type": "string",
+      "description": "correlates one operation across steps"
+    },
     "user_id": {
       "type": "string",
       "description": "pseudonymous salted hash only"
@@ -52,8 +60,18 @@
         "ios"
       ]
     },
+    "app_id": {
+      "type": "string"
+    },
     "app_version": {
       "type": "string"
+    },
+    "environment": {
+      "enum": [
+        "production",
+        "staging",
+        "development"
+      ]
     },
     "os": {
       "type": "string"
@@ -77,11 +95,42 @@
     },
     "log_level": {
       "enum": [
+        "trace",
         "debug",
         "info",
         "warn",
-        "error"
+        "error",
+        "fatal"
       ]
+    },
+    "severity": {
+      "enum": [
+        "trace",
+        "debug",
+        "info",
+        "warn",
+        "error",
+        "fatal"
+      ]
+    },
+    "category": {
+      "enum": [
+        "application",
+        "error",
+        "security",
+        "performance",
+        "user_activity",
+        "infrastructure",
+        "api_network",
+        "database",
+        "audit",
+        "analytics",
+        "background_job",
+        "debug_trace"
+      ]
+    },
+    "message": {
+      "type": "string"
     },
     "release_channel": {
       "enum": [

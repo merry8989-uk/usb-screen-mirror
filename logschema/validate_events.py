@@ -26,10 +26,20 @@ SCHEMA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "event_sc
 REQUIRED = [
     "event_name", "schema_version", "timestamp", "session_id",
     "platform", "app_version", "os", "device_model", "screen_or_route", "log_level",
+    "severity", "category", "app_id", "environment",
 ]
+SEVERITIES = {"trace", "debug", "info", "warn", "error", "fatal"}
+CATEGORIES = {
+    "application", "error", "security", "performance", "user_activity",
+    "infrastructure", "api_network", "database", "audit", "analytics",
+    "background_job", "debug_trace",
+}
 ENUMS = {
     "platform": {"windows", "linux", "macos", "web", "android", "ios"},
-    "log_level": {"debug", "info", "warn", "error"},
+    "log_level": SEVERITIES,
+    "severity": SEVERITIES,
+    "category": CATEGORIES,
+    "environment": {"production", "staging", "development"},
     "release_channel": {"production", "beta", "dev"},
     "network_type": {"wifi", "4g", "5g", "ethernet", "offline", "usb", "unknown"},
 }

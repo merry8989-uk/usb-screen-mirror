@@ -43,7 +43,7 @@ from tkinter import ttk, messagebox, filedialog
 from urllib.parse import quote
 
 APP_TITLE = "PhoneMirror  -  Screen Mirror (scrcpy wrapper)"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 DIAG_EMAIL = "br19shc39@gmail.com"
 
 IS_WINDOWS = (os.name == "nt")
@@ -75,14 +75,61 @@ def save_config(cfg):
 
 
 # --------------------------------------------------------------------------- #
-#  Structured logging  -  ProGallery Logging Spec v1.0
-#  (common envelope, log levels, sampling, retention, PII redaction)
+#  Structured logging  -  ProGallery spec + log taxonomy
+#  (common envelope, 12 categories, 6 severities, sampling, retention, PII redaction)
 # --------------------------------------------------------------------------- #
 LOG_SCHEMA_VERSION = "1.0.0"
 LOG_MAX_EVENTS = 5000           # retention: memory/export me max events
 LOG_RETENTION_DAYS = 7          # retention: isse purane events drop
-LOG_SAMPLE_INFO_RATE = 1.0      # info/debug sample rate (errors/warn always 100%)
+LOG_SAMPLE_INFO_RATE = 1.0      # trace/debug/info sample rate (warn/error/fatal always 100%)
 LOG_RELEASE_CHANNEL = "production"
+APP_ID = "phonemirror-desktop"
+LOG_ENVIRONMENT = "production"
+
+# Log taxonomy: 12 categories
+LOG_CATEGORIES = (
+    "application", "error", "security", "performance", "user_activity",
+    "infrastructure", "api_network", "database", "audit", "analytics",
+    "background_job", "debug_trace",
+)
+# 6 severity levels
+LOG_SEVERITIES = ("trace", "debug", "info", "warn", "error", "fatal")
+
+# event_name -> category (log taxonomy)
+EVENT_CATEGORY = {
+    "session_start": "application",
+    "session_end": "application",
+    "mirror_result": "application",
+    "device_state_resolved": "application",
+    "device_refresh_result": "application",
+    "screen_view": "user_activity",
+    "mirror_requested": "user_activity",
+    "preset_applied": "user_activity",
+    "device_authorization_failed": "security",
+    "adb_command": "api_network",
+    "performance_marker": "performance",
+    "export_saved": "audit",
+    "email_compose": "audit",
+    "share_bundle": "audit",
+    "settings_changed": "audit",
+    "diagnostics_toggled": "audit",
+    "diagnostics_cleaned": "audit",
+    "reconnect_attempt": "background_job",
+    "reconnect_result": "background_job",
+    "reconnect_loop": "background_job",
+    "tool_probe": "background_job",
+    "environment_snapshot": "infrastructure",
+    "error_state_shown": "error",
+    "crash": "error",
+    "queue_drain": "debug_trace",
+}
+
+
+def category_for(event_name, override=""):
+    """Event ka log category nikalo (override pehle, warna map, warna application)."""
+    if override:
+        return override
+    return EVENT_CATEGORY.get(event_name, "application")
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _WINPATH_RE = re.compile(r"[A-Za-z]:\\[^\s\"]+")
@@ -134,23 +181,31 @@ def _device_model():
 
 
 def make_event(event_name, log_level, screen_or_route, session_id,
-               attempt_id=None, user_id=None, network_type=None, props=None):
-    """ProGallery common event envelope (Part B)."""
+               attempt_id=None, user_id=None, network_type=None, props=None,
+               category="application", message="", request_id=""):
+    """Common event envelope: ProGallery spec + log taxonomy (category, severity)."""
     ev = {
         "event_name": event_name,
         "schema_version": LOG_SCHEMA_VERSION,
         "timestamp": utc_now(),
         "session_id": session_id,
         "platform": _platform_enum(),
+        "app_id": APP_ID,
         "app_version": APP_VERSION,
+        "environment": LOG_ENVIRONMENT,
         "os": _env_os(),
         "device_model": _device_model(),
         "screen_or_route": screen_or_route,
         "log_level": log_level,
+        "severity": log_level,
+        "category": category if category in LOG_CATEGORIES else "application",
+        "message": redact(message or event_name),
         "release_channel": LOG_RELEASE_CHANNEL,
     }
     if attempt_id:
         ev["attempt_id"] = attempt_id
+    if request_id:
+        ev["request_id"] = request_id
     if user_id:
         ev["user_id"] = user_id
     if network_type:
@@ -175,14 +230,16 @@ class StructuredLogger:
         return "%s_%04d" % (prefix, self.attempt_seq)
 
     def log(self, event_name, log_level, screen_or_route,
-            attempt_id=None, props=None, network_type=None):
-        # sampling: errors/warn hamesha 100%, info/debug sampled
-        if log_level in ("debug", "info") and LOG_SAMPLE_INFO_RATE < 1.0:
+            attempt_id=None, props=None, network_type=None,
+            category="application", message="", request_id=""):
+        # sampling: warn/error/fatal hamesha 100%, trace/debug/info sampled
+        if log_level in ("trace", "debug", "info") and LOG_SAMPLE_INFO_RATE < 1.0:
             if random.random() > LOG_SAMPLE_INFO_RATE:
                 return None
         ev = make_event(event_name, log_level, screen_or_route, self.session_id,
                         attempt_id=attempt_id, user_id=self.user_id,
-                        network_type=network_type, props=props)
+                        network_type=network_type, props=props,
+                        category=category, message=message, request_id=request_id)
         self.events.append(ev)
         self._enforce_retention()
         return ev
@@ -209,15 +266,40 @@ class StructuredLogger:
 def sample_events(session_id="sess_sample"):
     """CI validation ke liye sample events (schema ke against check hote hain)."""
     lg = StructuredLogger(session_id)
-    lg.log("session_start", "info", "Main", props={"start_type": "cold"})
-    lg.log("screen_view", "info", "Diagnostics", props={"screen_name": "Diagnostics", "previous_screen": "Main"})
-    lg.log("device_state_resolved", "info", "Main", props={"state": "authorized", "device_count": 1})
-    lg.log("mirror_requested", "info", "Main", attempt_id="att_0001", props={"device_count": 1, "video_source": "display"})
-    lg.log("mirror_result", "info", "Main", attempt_id="att_0001", props={"outcome": "success"})
-    lg.log("adb_command", "debug", "Main", props={"command": "adb devices", "outcome": "success", "latency_ms": 12})
-    lg.log("error_state_shown", "error", "Main", props={"error_code": "scrcpy_missing", "message_key": "scrcpy_not_found"})
-    lg.log("export_saved", "info", "Diagnostics", props={"format": "jsonl", "outcome": "success"})
-    lg.log("share_bundle", "info", "Diagnostics", props={"outcome": "success", "format": "zip"})
+    def e(name, level, screen, **kw):
+        lg.log(name, level, screen, category=category_for(name), **kw)
+
+    # application
+    e("session_start", "info", "Main", props={"start_type": "cold"})
+    e("session_end", "info", "Main", props={"reason": "user_close"})
+    # infrastructure
+    e("environment_snapshot", "info", "Main", props={"os": "Windows 11", "python": "3.12"})
+    # user_activity
+    e("screen_view", "info", "Diagnostics", props={"screen_name": "Diagnostics"})
+    e("preset_applied", "info", "Main", props={"setting": "preset", "value": "Balanced"})
+    # application (device)
+    e("device_state_resolved", "info", "Main", props={"state": "authorized", "device_count": 1})
+    # security
+    e("device_authorization_failed", "warn", "Main", props={"state": "unauthorized", "device_count": 1})
+    # user_activity (mirror)
+    e("mirror_requested", "info", "Main", attempt_id="att_0001", props={"device_count": 1})
+    e("mirror_result", "info", "Main", attempt_id="att_0001", props={"outcome": "success"})
+    # api_network
+    e("adb_command", "debug", "Main", props={"command": "adb devices", "outcome": "success", "latency_ms": 12})
+    # performance
+    e("performance_marker", "info", "Main", props={"flow": "adb_command", "duration_ms": 12})
+    # background_job
+    e("reconnect_attempt", "info", "Main", props={"attempt_number": 1})
+    e("tool_probe", "debug", "Main", props={"outcome": "success"})
+    # audit
+    e("settings_changed", "info", "Main", props={"setting": "preset"})
+    e("export_saved", "info", "Diagnostics", props={"format": "jsonl", "outcome": "success"})
+    e("share_bundle", "info", "Diagnostics", props={"outcome": "success", "format": "zip"})
+    # error
+    e("error_state_shown", "error", "Main", props={"error_code": "scrcpy_missing"})
+    e("crash", "fatal", "Main", props={"fatal": True, "exception_type": "RuntimeError"})
+    # debug_trace
+    e("queue_drain", "trace", "Main", props={"processed": 250})
     return lg.events
 
 
@@ -923,17 +1005,23 @@ class PhoneMirrorApp:
         self._apply_saved(cfg.get("settings", {}))
         self._poll_log()
         self._ev("session_start", "info", "Main", props={"start_type": "cold"})
+        self._ev("environment_snapshot", "info", "Main",
+                 props={"os": _env_os(), "python": sys.version.split()[0],
+                        "machine": _device_model()})
         self.refresh_probe()
         self.refresh_devices()
         self.root.after(5000, self._auto_refresh_tick)
 
     # ---------------- structured events ----------------
-    def _ev(self, event_name, log_level, screen_or_route, attempt_id=None, props=None):
-        """Structured event log (sirf diagnostics ON hone par) + device file me save."""
+    def _ev(self, event_name, log_level, screen_or_route, attempt_id=None, props=None,
+            category="", message=""):
+        """Structured event log (sirf diagnostics ON hone par) + device file me save.
+        category event_name se infer hoti hai (ya explicit override)."""
         if not self.diag_enabled.get():
             return None
         ev = self.logger.log(event_name, log_level, screen_or_route,
-                             attempt_id=attempt_id, props=props)
+                             attempt_id=attempt_id, props=props,
+                             category=category_for(event_name, category), message=message)
         if ev is not None:
             try:
                 self.filelog.write_event(ev)
@@ -1220,18 +1308,28 @@ class PhoneMirrorApp:
                     "outcome": "success" if res["ok"] else "failed",
                     "latency_ms": res["ms"],
                 })
+                self._ev("performance_marker", "info", screen,
+                         props={"flow": "adb_command", "duration_ms": res["ms"]})
             on_done(ok, res)
 
         self._run_bg(work, done)
 
     # ---------------- diagnostics ----------------
     def set_diag_enabled(self, value):
-        self.diag_enabled.set(bool(value))
+        value = bool(value)
+        if not value:
+            # off karne se pehle audit entry likho (warna collect band ho jata hai)
+            self._ev("diagnostics_toggled", "warn", "Diagnostics", props={"enabled": False})
+        self.diag_enabled.set(value)
         cfg = load_config()
-        cfg["diagnostics_enabled"] = bool(value)
+        cfg["diagnostics_enabled"] = value
         save_config(cfg)
+        if value:
+            self._ev("diagnostics_toggled", "info", "Diagnostics", props={"enabled": True})
 
     def clean_diagnostics(self):
+        self._ev("diagnostics_cleaned", "warn", "Diagnostics",
+                 props={"log_lines": len(self.diag), "events": len(self.logger.events)})
         self.diag = []
         self.logger.events = []
         self.log.configure(state="normal")
@@ -1280,6 +1378,10 @@ class PhoneMirrorApp:
         def done(ok, res):
             if ok:
                 self._probe.update(res)
+                self._ev("tool_probe", "debug", "Main",
+                         props={"outcome": "success",
+                                "scrcpy_version": res.get("scrcpy_version", ""),
+                                "adb_version": res.get("adb_version", "")})
 
         self._run_bg(work, done)
 
@@ -1323,6 +1425,7 @@ class PhoneMirrorApp:
 
     def save_report(self, rep, path, fmt):
         fmt = (fmt or "txt").lower().lstrip(".")
+        t0 = time.time()
         try:
             if fmt == "txt":
                 with open(path, "w", encoding="utf-8") as f:
@@ -1355,8 +1458,11 @@ class PhoneMirrorApp:
             self._ev("export_saved", "error", "Diagnostics",
                      props={"format": fmt, "outcome": "failed", "error_code": "export_error"})
             raise
+        dur = int((time.time() - t0) * 1000)
         self._ev("export_saved", "info", "Diagnostics",
-                 props={"format": fmt, "outcome": "success"})
+                 props={"format": fmt, "outcome": "success", "duration_ms": dur})
+        self._ev("performance_marker", "info", "Diagnostics",
+                 props={"flow": "export", "duration_ms": dur})
 
     def email_report(self, gmail=True):
         rep = self.build_report()
@@ -1540,6 +1646,8 @@ class PhoneMirrorApp:
         self.audio_buffer.set(p["audio_buffer"])
         self.preset_desc.configure(text="[%s]  %s" % (name, p["desc"]))
         self.status.configure(text="Preset lagaya: %s" % name)
+        self._ev("settings_changed", "info", "Main",
+                 props={"setting": "preset", "value": name})
         self.save_settings()
 
     def _int_var(self, var, default=0, lo=None, hi=None):
@@ -1717,6 +1825,7 @@ class PhoneMirrorApp:
         if self._refreshing:
             return
         self._refreshing = True
+        t0 = time.time()
         if not quiet:
             self.device_status.configure(text="Devices dhoondh rahe hain...", foreground="#666")
 
@@ -1783,6 +1892,12 @@ class PhoneMirrorApp:
                      props={"state": state, "device_count": len(self.devices), "ready_count": len(ready)})
             self._ev("device_refresh_result", "info", "Main",
                      props={"outcome": "success", "device_count": len(self.devices), "ready_count": len(ready)})
+            self._ev("performance_marker", "info", "Main",
+                     props={"flow": "device_scan", "duration_ms": int((time.time() - t0) * 1000)})
+            if state == "unauthorized":
+                # security: phone ne USB debugging permission nahi di
+                self._ev("device_authorization_failed", "warn", "Main",
+                         props={"state": state, "device_count": len(self.devices)})
 
         self._run_bg(lambda: list_devices(adb), done)
 
@@ -1928,6 +2043,9 @@ class PhoneMirrorApp:
                         pass
         except queue.Empty:
             pass
+        if processed >= 200:
+            # debug_trace: bada backlog ek cycle me nikla (UI responsiveness check)
+            self._ev("queue_drain", "trace", "Main", props={"processed": processed})
         self.root.after(50, self._poll_log)
 
     def _on_session_end(self, serial):
