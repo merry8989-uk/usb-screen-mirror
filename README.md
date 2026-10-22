@@ -104,12 +104,26 @@ App me **⚙ Diagnostics** button hai (neeche daayein). Yeh ek alag window kholt
 - **Preview** — current report (environment, scrcpy/adb version, devices, settings, log).
 - **Refresh** — report dobara banao. **Clean** — collected data + log clear karo.
 - **Copy report** — poora report clipboard me.
-- **Save as...** — format chuno: **txt, md, json, jsonl, csv, xlsx** (Excel). Default jagah
-  `~/Documents/PhoneMirror/`.
-- **Email (Gmail compose)** / **Email (mail app)** — **`br19shc39@gmail.com`** par
+- **Save as...** — format chuno: **txt, md, json, jsonl, csv, xlsx, zip**. Default jagah
+  `~/Documents/PhoneMirror/`. **zip** ek poora bundle hai (report.md / report.txt / report.json /
+  events.jsonl + saare device logs).
+- **Share bundle** — zip bundle banata hai, uska path clipboard me copy karta hai, aur folder khol deta hai;
+  phir kisi bhi app (WhatsApp / Telegram / email) me paste ya attach kar do.
+- **Email (Gmail)** / **Email (mail app)** — **`br19shc39@gmail.com`** par
   compose khulta hai, To/Subject/Body pehle se bhare hue (summary + last 40 log lines).
-  Poora report ek file me save hoke clipboard me bhi copy ho jaata hai — bas usse attach kar dena.
-- **Open folder** — exports ki folder kholo (attach karne me aasaan).
+  Poora zip bundle file me save hoke clipboard me bhi copy ho jaata hai — bas usse attach kar dena.
+- **Open exports** / **Open logs** — exports ya logs ki folder kholo.
+
+### Logs device par continuously save hote hain
+
+Diagnostics ON hone par app logs **disk par continuously** likhti rehti hai:
+`~/Documents/PhoneMirror/logs/`
+
+- `events-YYYYMMDD.jsonl` — structured events (ek per line, schema-compliant)
+- `phonemirror-YYYYMMDD.log` — human-readable log
+- **Daily rotate** + **retention** (7 din se purani files auto-delete).
+- **Clean** dabane par in-memory data + on-disk logs dono clear ho jaate hain.
+- Diagnostics off karne par app naya kuch collect ya likhti nahi (purani files rah jaati hain).
 
 `.xlsx` ke liye `openpyxl` chahiye (`pip install openpyxl`); na ho to CSV/TXT/MD/JSONL use karo.
 

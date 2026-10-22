@@ -43,7 +43,7 @@ from tkinter import ttk, messagebox, filedialog
 from urllib.parse import quote
 
 APP_TITLE = "PhoneMirror  -  Screen Mirror (scrcpy wrapper)"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 DIAG_EMAIL = "br19shc39@gmail.com"
 
 IS_WINDOWS = (os.name == "nt")
@@ -217,7 +217,76 @@ def sample_events(session_id="sess_sample"):
     lg.log("adb_command", "debug", "Main", props={"command": "adb devices", "outcome": "success", "latency_ms": 12})
     lg.log("error_state_shown", "error", "Main", props={"error_code": "scrcpy_missing", "message_key": "scrcpy_not_found"})
     lg.log("export_saved", "info", "Diagnostics", props={"format": "jsonl", "outcome": "success"})
+    lg.log("share_bundle", "info", "Diagnostics", props={"outcome": "success", "format": "zip"})
     return lg.events
+
+
+class FileLogWriter:
+    """Logs device par continuously save karta hai (JSONL events + plain log).
+    Daily rotate + retention (purani files auto-delete)."""
+
+    def __init__(self, log_dir):
+        self.dir = log_dir
+        self._day = ""
+        self._events_path = ""
+        self._log_path = ""
+        try:
+            os.makedirs(self.dir, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        self._rotate()
+        self.enforce_retention()
+
+    def _rotate(self):
+        day = time.strftime("%Y%m%d")
+        if day != self._day:
+            self._day = day
+            self._events_path = os.path.join(self.dir, "events-%s.jsonl" % day)
+            self._log_path = os.path.join(self.dir, "phonemirror-%s.log" % day)
+
+    def _append(self, path, line):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    def write_event(self, ev):
+        self._rotate()
+        self._append(self._events_path, json.dumps(ev, ensure_ascii=False))
+
+    def write_line(self, serial, text):
+        self._rotate()
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        prefix = ("[%s] " % serial) if serial else ""
+        self._append(self._log_path, "%s  %s%s" % (ts, prefix, text))
+
+    def files(self):
+        try:
+            return [os.path.join(self.dir, n) for n in sorted(os.listdir(self.dir))
+                    if n.startswith("events-") or n.startswith("phonemirror-")]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def clear(self):
+        for p in self.files():
+            try:
+                os.remove(p)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def enforce_retention(self):
+        cutoff = time.time() - LOG_RETENTION_DAYS * 86400
+        for p in self.files():
+            try:
+                if os.path.getmtime(p) < cutoff:
+                    os.remove(p)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def default_base_dir():
+    """Exports + logs ki base folder."""
+    home = os.path.expanduser("~")
+    docs = os.path.join(home, "Documents")
+    return os.path.join(docs, "PhoneMirror") if os.path.isdir(docs) else os.path.join(home, "PhoneMirror")
 
 
 # --------------------------------------------------------------------------- #
@@ -575,6 +644,24 @@ def write_jsonl(rep, path):
         f.write("\n".join(json.dumps(e, ensure_ascii=False) for e in rep.get("events", [])))
 
 
+def write_zip(rep, path, logs_dir=None):
+    """Poora bundle ek zip me: report.md/txt/json + events.jsonl + device logs."""
+    import zipfile  # noqa: WPS433
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("report.md", render_md(rep))
+        z.writestr("report.txt", render_txt(rep))
+        z.writestr("report.json", json.dumps(rep, indent=2, ensure_ascii=False))
+        z.writestr("events.jsonl",
+                   "\n".join(json.dumps(e, ensure_ascii=False) for e in rep.get("events", [])))
+        if logs_dir and os.path.isdir(logs_dir):
+            for name in sorted(os.listdir(logs_dir)):
+                if name.startswith("events-") or name.startswith("phonemirror-"):
+                    try:
+                        z.write(os.path.join(logs_dir, name), arcname="device_logs/" + name)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+
 # --------------------------------------------------------------------------- #
 #  Session
 # --------------------------------------------------------------------------- #
@@ -630,14 +717,16 @@ class DiagnosticsWindow(tk.Toplevel):
         ttk.Label(bar, text="Format:").pack(side="left", padx=(16, 4))
         self.fmt = tk.StringVar(value="txt")
         ttk.Combobox(bar, textvariable=self.fmt, state="readonly", width=8,
-                     values=["txt", "md", "json", "jsonl", "csv", "xlsx"]).pack(side="left")
+                     values=["txt", "md", "json", "jsonl", "csv", "xlsx", "zip"]).pack(side="left")
         ttk.Button(bar, text="Save as...", command=self.save_as).pack(side="left", padx=6)
 
         bar2 = ttk.Frame(self)
         bar2.pack(fill="x", **pad)
-        ttk.Button(bar2, text="\u2709  Email (Gmail compose)", command=lambda: self.email(True)).pack(side="left", padx=3)
-        ttk.Button(bar2, text="\u2709  Email (mail app)", command=lambda: self.email(False)).pack(side="left", padx=3)
-        ttk.Button(bar2, text="Open folder", command=self.open_folder).pack(side="left", padx=3)
+        ttk.Button(bar2, text="Share bundle", command=self.share).pack(side="left", padx=3)
+        ttk.Button(bar2, text="Email (Gmail)", command=lambda: self.email(True)).pack(side="left", padx=3)
+        ttk.Button(bar2, text="Email (mail app)", command=lambda: self.email(False)).pack(side="left", padx=3)
+        ttk.Button(bar2, text="Open exports", command=self.open_folder).pack(side="left", padx=3)
+        ttk.Button(bar2, text="Open logs", command=self.open_logs).pack(side="left", padx=3)
         ttk.Label(bar2, text="Email: %s" % DIAG_EMAIL, foreground="#666").pack(side="right", padx=6)
 
         self.status = ttk.Label(self, text="", anchor="w", relief="sunken")
@@ -712,6 +801,24 @@ class DiagnosticsWindow(tk.Toplevel):
         except Exception:  # noqa: BLE001
             messagebox.showinfo("Folder", d)
 
+    def open_logs(self):
+        d = self.app.logs_dir()
+        try:
+            if IS_WINDOWS:
+                os.startfile(d)  # noqa: S606
+            else:
+                webbrowser.open("file://" + d)
+        except Exception:  # noqa: BLE001
+            messagebox.showinfo("Logs folder", d)
+
+    def share(self):
+        try:
+            path = self.app.share_bundle()
+            self._last_path = path
+            self.status.configure(text="Share bundle: %s (path clipboard me)" % path)
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("Share fail", str(exc))
+
 
 # --------------------------------------------------------------------------- #
 #  Main app
@@ -737,6 +844,7 @@ class PhoneMirrorApp:
         self._launch_attempt = None
         self.session_id = "sess_" + _rand_hex(12)
         self.logger = StructuredLogger(self.session_id)
+        self.filelog = FileLogWriter(os.path.join(default_base_dir(), "logs"))
         self.scrcpy_path = tk.StringVar(value=find_executable("scrcpy") or "")
         self.adb_path = tk.StringVar(value=find_executable("adb") or "")
 
@@ -782,11 +890,17 @@ class PhoneMirrorApp:
 
     # ---------------- structured events ----------------
     def _ev(self, event_name, log_level, screen_or_route, attempt_id=None, props=None):
-        """Structured event log (sirf diagnostics ON hone par)."""
+        """Structured event log (sirf diagnostics ON hone par) + device file me save."""
         if not self.diag_enabled.get():
             return None
-        return self.logger.log(event_name, log_level, screen_or_route,
-                               attempt_id=attempt_id, props=props)
+        ev = self.logger.log(event_name, log_level, screen_or_route,
+                             attempt_id=attempt_id, props=props)
+        if ev is not None:
+            try:
+                self.filelog.write_event(ev)
+            except Exception:  # noqa: BLE001
+                pass
+        return ev
 
     def _dev_pseudonym(self, serial):
         return salted_hash(serial, self._salt)
@@ -979,13 +1093,18 @@ class PhoneMirrorApp:
         self.log.see("end")
         self.log.configure(state="disabled")
         if self.diag_enabled.get():
+            safe = redact(text)
             self.diag.append({
                 "time": datetime.datetime.now().strftime("%H:%M:%S"),
                 "serial": serial or "",
-                "text": redact(text),
+                "text": safe,
             })
             if len(self.diag) > 5000:
                 del self.diag[:1000]
+            try:
+                self.filelog.write_line(serial, safe)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _adb(self):
         adb = self.adb_path.get().strip()
@@ -1018,15 +1137,25 @@ class PhoneMirrorApp:
         self.log.configure(state="normal")
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
+        try:
+            self.filelog.clear()
+        except Exception:  # noqa: BLE001
+            pass
 
     def diagnostics_dir(self):
-        home = os.path.expanduser("~")
-        docs = os.path.join(home, "Documents")
-        d = os.path.join(docs, "PhoneMirror") if os.path.isdir(docs) else os.path.join(home, "PhoneMirror")
+        d = default_base_dir()
         try:
             os.makedirs(d, exist_ok=True)
         except Exception:  # noqa: BLE001
-            d = home
+            d = os.path.expanduser("~")
+        return d
+
+    def logs_dir(self):
+        d = os.path.join(self.diagnostics_dir(), "logs")
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
         return d
 
     def build_report(self):
@@ -1095,12 +1224,14 @@ class PhoneMirrorApp:
                 write_jsonl(rep, path)
             elif fmt == "csv":
                 write_csv(rep, path)
+            elif fmt == "zip":
+                write_zip(rep, path, self.logs_dir())
             elif fmt == "xlsx":
                 try:
                     write_xlsx(rep, path)
                 except ImportError:
                     raise RuntimeError("xlsx ke liye openpyxl chahiye.\n\nInstall: pip install openpyxl\n"
-                                       "(ya CSV/TXT/JSONL format use karo)")
+                                       "(ya CSV/TXT/JSONL/ZIP format use karo)")
             else:
                 raise RuntimeError("Unknown format: %s" % fmt)
         except RuntimeError:
@@ -1118,10 +1249,9 @@ class PhoneMirrorApp:
         rep = self.build_report()
         d = self.diagnostics_dir()
         ts = time.strftime("%Y%m%d_%H%M%S")
-        path = os.path.join(d, "PhoneMirror_diagnostics_%s.md" % ts)
+        path = os.path.join(d, "PhoneMirror_diagnostics_%s.zip" % ts)
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(render_md(rep))
+            write_zip(rep, path, self.logs_dir())
         except Exception as exc:  # noqa: BLE001
             self._ev("email_compose", "error", "Diagnostics",
                      props={"outcome": "failed", "error_code": "report_save_failed"})
@@ -1147,6 +1277,30 @@ class PhoneMirrorApp:
                  props={"outcome": "success", "channel": "gmail" if gmail else "mailto"})
         self._log(None, "[i] Email compose khula -> %s (report: %s)" % (DIAG_EMAIL, path))
         self.status.configure(text="Email compose khula. Report file: %s" % path)
+        return path
+
+    def share_bundle(self):
+        """Zip bundle banao, uska path clipboard me copy karo, aur folder kholo.
+        Phir user kisi bhi app (WhatsApp / Telegram / email) me paste ya attach kar sakta hai."""
+        rep = self.build_report()
+        d = self.diagnostics_dir()
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        path = os.path.join(d, "PhoneMirror_diagnostics_%s.zip" % ts)
+        write_zip(rep, path, self.logs_dir())
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(path)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if IS_WINDOWS:
+                os.startfile(d)  # noqa: S606
+        except Exception:  # noqa: BLE001
+            pass
+        self._ev("share_bundle", "info", "Diagnostics",
+                 props={"outcome": "success", "format": "zip", "channel": "clipboard+folder"})
+        self._log(None, "[i] Share bundle ready: %s (path clipboard me)" % path)
+        self.status.configure(text="Share ready - zip path clipboard me, folder khul gayi.")
         return path
 
     def open_diagnostics(self):
