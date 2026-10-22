@@ -43,7 +43,7 @@ from tkinter import ttk, messagebox, filedialog
 from urllib.parse import quote
 
 APP_TITLE = "PhoneMirror  -  Screen Mirror (scrcpy wrapper)"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 DIAG_EMAIL = "br19shc39@gmail.com"
 
 IS_WINDOWS = (os.name == "nt")
@@ -230,33 +230,62 @@ class FileLogWriter:
         self._day = ""
         self._events_path = ""
         self._log_path = ""
+        self._ef = None      # events file handle (open rehta hai)
+        self._lf = None      # plain log file handle
         try:
             os.makedirs(self.dir, exist_ok=True)
         except Exception:  # noqa: BLE001
             pass
         self._rotate()
-        self.enforce_retention()
 
     def _rotate(self):
         day = time.strftime("%Y%m%d")
-        if day != self._day:
-            self._day = day
-            self._events_path = os.path.join(self.dir, "events-%s.jsonl" % day)
-            self._log_path = os.path.join(self.dir, "phonemirror-%s.log" % day)
+        if day == self._day:
+            return
+        self._close_handles()
+        self._day = day
+        self._events_path = os.path.join(self.dir, "events-%s.jsonl" % day)
+        self._log_path = os.path.join(self.dir, "phonemirror-%s.log" % day)
+        self.enforce_retention()
 
-    def _append(self, path, line):
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
+    def _close_handles(self):
+        for attr in ("_ef", "_lf"):
+            f = getattr(self, attr)
+            if f is not None:
+                try:
+                    f.flush()
+                    f.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                setattr(self, attr, None)
+
+    def close(self):
+        self._close_handles()
+
+    def _handle(self, events):
+        attr = "_ef" if events else "_lf"
+        f = getattr(self, attr)
+        if f is None or f.closed:
+            path = self._events_path if events else self._log_path
+            f = open(path, "a", encoding="utf-8", buffering=1)  # line-buffered
+            setattr(self, attr, f)
+        return f
 
     def write_event(self, ev):
-        self._rotate()
-        self._append(self._events_path, json.dumps(ev, ensure_ascii=False))
+        try:
+            self._rotate()
+            self._handle(True).write(json.dumps(ev, ensure_ascii=False) + "\n")
+        except Exception:  # noqa: BLE001
+            pass
 
     def write_line(self, serial, text):
-        self._rotate()
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        prefix = ("[%s] " % serial) if serial else ""
-        self._append(self._log_path, "%s  %s%s" % (ts, prefix, text))
+        try:
+            self._rotate()
+            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            prefix = ("[%s] " % serial) if serial else ""
+            self._handle(False).write("%s  %s%s\n" % (ts, prefix, text))
+        except Exception:  # noqa: BLE001
+            pass
 
     def files(self):
         try:
@@ -266,6 +295,7 @@ class FileLogWriter:
             return []
 
     def clear(self):
+        self._close_handles()
         for p in self.files():
             try:
                 os.remove(p)
@@ -842,6 +872,9 @@ class PhoneMirrorApp:
         self.diag = []                      # collected human-readable log entries
         self._diag_win = None
         self._launch_attempt = None
+        self._launch_multi = False
+        self._refreshing = False
+        self._probe = {"scrcpy_version": "", "adb_version": ""}
         self.session_id = "sess_" + _rand_hex(12)
         self.logger = StructuredLogger(self.session_id)
         self.filelog = FileLogWriter(os.path.join(default_base_dir(), "logs"))
@@ -886,6 +919,7 @@ class PhoneMirrorApp:
         self._build_ui()
         self._poll_log()
         self._ev("session_start", "info", "Main", props={"start_type": "cold"})
+        self.refresh_probe()
         self.refresh_devices()
 
     # ---------------- structured events ----------------
@@ -1124,6 +1158,41 @@ class PhoneMirrorApp:
         })
         return ok, out
 
+    def _run_bg(self, fn, on_done):
+        """fn() ko background thread me chalao (UI freeze na ho).
+        Result main thread par on_done(ok, res) se aata hai (queue ke through)."""
+        def work():
+            try:
+                res = fn()
+                self.log_q.put(("call", lambda: on_done(True, res)))
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                self.log_q.put(("call", lambda: on_done(False, msg)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _adb_bg(self, args, screen, on_done):
+        """adb command background me + adb_command event log."""
+        adb = self._adb()
+        if not adb:
+            on_done(False, {"ok": False, "out": "adb nahi mila", "ms": 0})
+            return
+
+        def work():
+            t0 = time.time()
+            ok, out = run_adb(adb, args)
+            return {"ok": ok, "out": out, "ms": int((time.time() - t0) * 1000)}
+
+        def done(ok, res):
+            if ok:
+                self._ev("adb_command", "debug", screen, props={
+                    "command": "adb " + " ".join(args),
+                    "outcome": "success" if res["ok"] else "failed",
+                    "latency_ms": res["ms"],
+                })
+            on_done(ok, res)
+
+        self._run_bg(work, done)
+
     # ---------------- diagnostics ----------------
     def set_diag_enabled(self, value):
         self.diag_enabled.set(bool(value))
@@ -1158,25 +1227,37 @@ class PhoneMirrorApp:
             pass
         return d
 
-    def build_report(self):
-        scrcpy = self._resolve_scrcpy()
-        scrcpy_ver = ""
-        if scrcpy:
-            try:
-                out = subprocess.run([scrcpy, "--version"], capture_output=True, text=True,
-                                     timeout=10, creationflags=CREATE_NO_WINDOW).stdout.strip()
-                scrcpy_ver = out.splitlines()[0] if out else ""
-            except Exception as exc:  # noqa: BLE001
-                scrcpy_ver = "error: %s" % exc
+    def refresh_probe(self):
+        """scrcpy/adb version background me probe karo (UI block na ho)."""
+        def work():
+            scrcpy = self._resolve_scrcpy()
+            sv = ""
+            if scrcpy:
+                try:
+                    out = subprocess.run([scrcpy, "--version"], capture_output=True, text=True,
+                                         timeout=10, creationflags=CREATE_NO_WINDOW).stdout.strip()
+                    sv = out.splitlines()[0] if out else ""
+                except Exception as exc:  # noqa: BLE001
+                    sv = "error: %s" % exc
+            adb = self._adb()
+            av = ""
+            if adb:
+                ok, out = run_adb(adb, ["version"])
+                av = out.splitlines()[0] if out else ""
+            return {"scrcpy_version": sv, "adb_version": av}
 
+        def done(ok, res):
+            if ok:
+                self._probe.update(res)
+
+        self._run_bg(work, done)
+
+    def build_report(self):
+        """Report banao - koi blocking subprocess call nahi (cached probe + device list)."""
+        scrcpy = self._resolve_scrcpy()
         adb = self._adb()
-        adb_ver = ""
-        devices = []
-        if adb:
-            ok, out = run_adb(adb, ["version"])
-            adb_ver = out.splitlines()[0] if out else ""
-            devs, _ = list_devices(adb)
-            devices = [{"serial": d["serial"], "state": d["state"], "model": d["model"]} for d in devs]
+        devices = [{"serial": d["serial"], "state": d["state"], "model": d["model"]}
+                   for d in self.devices]
 
         return {
             "generated_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -1190,7 +1271,8 @@ class PhoneMirrorApp:
                 "release_channel": LOG_RELEASE_CHANNEL,
             },
             "environment": {
-                "os": platform.platform(),
+                # platform.platform() internally subprocess use karta hai -> cheaper composite
+                "os": "%s %s (%s)" % (platform.system(), platform.release(), platform.machine()),
                 "system": platform.system(),
                 "release": platform.release(),
                 "machine": platform.machine(),
@@ -1198,9 +1280,9 @@ class PhoneMirrorApp:
             },
             "tools": {
                 "scrcpy_path": scrcpy or "",
-                "scrcpy_version": scrcpy_ver,
+                "scrcpy_version": self._probe.get("scrcpy_version", ""),
                 "adb_path": adb or "",
-                "adb_version": adb_ver,
+                "adb_version": self._probe.get("adb_version", ""),
             },
             "devices": devices,
             "settings": self.current_settings(),
@@ -1238,7 +1320,7 @@ class PhoneMirrorApp:
             self._ev("export_saved", "error", "Diagnostics",
                      props={"format": fmt, "outcome": "failed", "error_code": "export_failed"})
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             self._ev("export_saved", "error", "Diagnostics",
                      props={"format": fmt, "outcome": "failed", "error_code": "export_error"})
             raise
@@ -1306,6 +1388,7 @@ class PhoneMirrorApp:
     def open_diagnostics(self):
         self._ev("screen_view", "info", "Diagnostics",
                  props={"screen_name": "Diagnostics", "previous_screen": "Main"})
+        self.refresh_probe()
         if self._diag_win is not None and self._diag_win.winfo_exists():
             self._diag_win.lift()
             self._diag_win.refresh()
@@ -1337,20 +1420,33 @@ class PhoneMirrorApp:
         self.preset_desc.configure(text="[%s]  %s" % (name, p["desc"]))
         self.status.configure(text="Preset lagaya: %s" % name)
 
+    def _int_var(self, var, default=0, lo=None, hi=None):
+        """IntVar/Entry se safe integer nikalo.
+        User ne non-numeric text type kiya ho to crash nahi, default use hota hai."""
+        try:
+            v = int(var.get())
+        except Exception:  # noqa: BLE001
+            v = default
+        if lo is not None and v < lo:
+            v = lo
+        if hi is not None and v > hi:
+            v = hi
+        return v
+
     def current_settings(self):
         return {
             "video_source": self.video_source.get(),
-            "max_size": int(float(self.max_size.get())),
+            "max_size": self._int_var(self.max_size, 1024, 240, 4096),
             "bitrate": self.bitrate.get(),
-            "max_fps": int(self.max_fps.get()),
+            "max_fps": self._int_var(self.max_fps, 60, 1, 240),
             "codec": self.codec.get(),
             "camera_facing": self.camera_facing.get(),
             "camera_size": self.camera_size.get(),
-            "camera_fps": int(self.camera_fps.get()),
+            "camera_fps": self._int_var(self.camera_fps, 30, 1, 120),
             "audio": self.audio.get(),
             "audio_codec": self.audio_codec.get(),
             "audio_bitrate": self.audio_bitrate.get(),
-            "audio_buffer": int(self.audio_buffer.get()),
+            "audio_buffer": self._int_var(self.audio_buffer, 50, 0, 1000),
             "record": self.record.get(),
             "record_path": redact(self.record_path.get()),
             "no_control": self.no_control.get(),
@@ -1360,8 +1456,8 @@ class PhoneMirrorApp:
             "always_on_top": self.always_on_top.get(),
             "print_fps": self.print_fps.get(),
             "auto_reconnect": self.auto_reconnect.get(),
-            "reconnect_delay": int(self.reconnect_delay.get()),
-            "reconnect_max": int(self.reconnect_max.get()),
+            "reconnect_delay": self._int_var(self.reconnect_delay, 3, 1, 600),
+            "reconnect_max": self._int_var(self.reconnect_max, 0, 0, 100000),
             "connection_mode": self.connection_mode.get(),
         }
 
@@ -1383,7 +1479,7 @@ class PhoneMirrorApp:
         if base:
             root_, ext = os.path.splitext(base)
             ext = ext or ".mp4"
-            if len(self.selected_serials()) > 1:
+            if self._launch_multi:
                 return "%s_%s%s" % (root_, safe, ext)
             return base
         vids = os.path.join(os.path.expanduser("~"), "Videos")
@@ -1399,16 +1495,23 @@ class PhoneMirrorApp:
             self._ev("error_state_shown", "error", "Main",
                      props={"error_code": "adb_missing", "message_key": "adb_not_found"})
             return
-        ip = detect_phone_ip(adb, self.primary_serial())
-        if ip:
-            self.wifi_ip.set(ip)
-            self._log(None, "[i] Phone IP: %s" % ip)
-            self.status.configure(text="Phone IP: %s" % ip)
-        else:
-            self._log(None, "[!] IP detect nahi hua.")
-            self._ev("error_state_shown", "error", "Main",
-                     props={"error_code": "ip_not_found", "message_key": "ip_not_detected"})
-            messagebox.showwarning("IP nahi mila", "Phone Wi-Fi se juda hai aur USB se connected hai?")
+        self.status.configure(text="Phone IP dhoondh rahe hain...")
+        serial = self.primary_serial()
+
+        def done(ok, res):
+            ip = res if ok else None
+            if ip:
+                self.wifi_ip.set(ip)
+                self._log(None, "[i] Phone IP: %s" % ip)
+                self.status.configure(text="Phone IP: %s" % ip)
+            else:
+                self._log(None, "[!] IP detect nahi hua.")
+                self._ev("error_state_shown", "error", "Main",
+                         props={"error_code": "ip_not_found", "message_key": "ip_not_detected"})
+                messagebox.showwarning("IP nahi mila",
+                                       "Phone Wi-Fi se juda hai aur USB se connected hai?")
+
+        self._run_bg(lambda: detect_phone_ip(adb, serial), done)
 
     def enable_wifi(self):
         adb = self._adb()
@@ -1421,15 +1524,22 @@ class PhoneMirrorApp:
                      props={"error_code": "no_device", "message_key": "no_device_selected"})
             messagebox.showwarning("Device nahi", "Pehle USB se phone jodo aur Refresh dabao.")
             return
-        port = int(self.wifi_port.get())
-        ok, out = self._run_adb_logged(adb, ["-s", serial, "tcpip", str(port)])
-        self._log(None, "[i] adb tcpip %d -> %s" % (port, "OK" if ok else out))
-        if ok:
-            self.status.configure(text="Wi-Fi mode on. Cable nikaalo aur 'Connect' dabao.")
-        else:
-            self._ev("error_state_shown", "error", "Main",
-                     props={"error_code": "tcpip_failed", "message_key": "enable_wifi_failed"})
-            messagebox.showerror("Enable Wi-Fi fail", out or "adb tcpip fail hua.")
+        port = self._int_var(self.wifi_port, 5555, 1, 65535)
+        self.status.configure(text="Wi-Fi mode on kar rahe hain...")
+
+        def done(ok, res):
+            if not ok:
+                self._log(None, "[!] adb tcpip error: %s" % res)
+                return
+            self._log(None, "[i] adb tcpip %d -> %s" % (port, "OK" if res["ok"] else res["out"]))
+            if res["ok"]:
+                self.status.configure(text="Wi-Fi mode on. Cable nikaalo aur 'Connect' dabao.")
+            else:
+                self._ev("error_state_shown", "error", "Main",
+                         props={"error_code": "tcpip_failed", "message_key": "enable_wifi_failed"})
+                messagebox.showerror("Enable Wi-Fi fail", res["out"] or "adb tcpip fail hua.")
+
+        self._adb_bg(["-s", serial, "tcpip", str(port)], "Main", done)
 
     def connect_wifi(self):
         adb = self._adb()
@@ -1442,23 +1552,38 @@ class PhoneMirrorApp:
                      props={"error_code": "no_ip", "message_key": "ip_missing"})
             messagebox.showwarning("IP nahi", "Phone IP daalo ya 'Auto-detect IP' dabao.")
             return
-        target = "%s:%d" % (ip, int(self.wifi_port.get()))
-        ok, out = self._run_adb_logged(adb, ["connect", target])
-        self._log(None, "[i] adb connect %s -> %s" % (target, out))
-        self.refresh_devices()
-        self.status.configure(text="Connect try kiya. Device list check karo.")
+        target = "%s:%d" % (ip, self._int_var(self.wifi_port, 5555, 1, 65535))
+        self.status.configure(text="Connect kar rahe hain...")
+
+        def done(ok, res):
+            if not ok:
+                self._log(None, "[!] adb connect error: %s" % res)
+                return
+            self._log(None, "[i] adb connect %s -> %s" % (target, res["out"]))
+            self.refresh_devices()
+            self.status.configure(text="Connect try kiya. Device list check karo.")
+
+        self._adb_bg(["connect", target], "Main", done)
 
     def disconnect_wifi(self):
         adb = self._adb()
         ip = self.wifi_ip.get().strip()
-        if adb and ip:
-            target = "%s:%d" % (ip, int(self.wifi_port.get()))
-            ok, out = self._run_adb_logged(adb, ["disconnect", target])
-            self._log(None, "[i] adb disconnect %s -> %s" % (target, out))
+        if not (adb and ip):
+            return
+        target = "%s:%d" % (ip, self._int_var(self.wifi_port, 5555, 1, 65535))
+
+        def done(ok, res):
+            if not ok:
+                self._log(None, "[!] adb disconnect error: %s" % res)
+                return
+            self._log(None, "[i] adb disconnect %s -> %s" % (target, res["out"]))
             self.refresh_devices()
+
+        self._adb_bg(["disconnect", target], "Main", done)
 
     # ---------------- devices ----------------
     def refresh_devices(self):
+        """Devices ko background me scan karo - UI block nahi hoti."""
         adb = self._adb()
         if not adb:
             self.device_status.configure(text="adb nahi mila. Upar path set karo.", foreground="#b00")
@@ -1466,54 +1591,68 @@ class PhoneMirrorApp:
             self._ev("device_state_resolved", "error", "Main",
                      props={"state": "unknown", "device_count": 0, "error_code": "adb_missing"})
             return
+        if self._refreshing:
+            return
+        self._refreshing = True
+        self.device_status.configure(text="Devices dhoondh rahe hain...", foreground="#666")
 
         prev = set()
         for i in self.device_list.curselection():
             if i < len(self.devices):
                 prev.add(self.devices[i]["serial"])
 
-        newdevs, err = list_devices(adb)
-        if err:
-            self.device_status.configure(text="Device list error: %s" % err, foreground="#b00")
-            self._log(None, "[!] %s" % err)
-            self._ev("device_refresh_result", "error", "Main",
-                     props={"outcome": "failed", "error_code": "list_failed"})
-            return
+        def done(ok, res):
+            self._refreshing = False
+            if not ok:
+                self.device_status.configure(text="Device list error: %s" % res, foreground="#b00")
+                self._log(None, "[!] %s" % res)
+                self._ev("device_refresh_result", "error", "Main",
+                         props={"outcome": "failed", "error_code": "list_failed"})
+                return
+            newdevs, err = res
+            if err:
+                self.device_status.configure(text="Device list error: %s" % err, foreground="#b00")
+                self._log(None, "[!] %s" % err)
+                self._ev("device_refresh_result", "error", "Main",
+                         props={"outcome": "failed", "error_code": "list_failed"})
+                return
 
-        self.devices = newdevs
-        self.device_list.delete(0, "end")
-        for d in self.devices:
-            self.device_list.insert("end", d["label"])
+            self.devices = newdevs
+            self.device_list.delete(0, "end")
+            for d in self.devices:
+                self.device_list.insert("end", d["label"])
 
-        restored = False
-        for i, d in enumerate(self.devices):
-            if d["serial"] in prev:
-                self.device_list.selection_set(i)
-                restored = True
-        if not restored and self.devices:
-            self.device_list.selection_set(0)
+            restored = False
+            for i, d in enumerate(self.devices):
+                if d["serial"] in prev:
+                    self.device_list.selection_set(i)
+                    restored = True
+            if not restored and self.devices:
+                self.device_list.selection_set(0)
 
-        ready = [d for d in self.devices if d["state"] == "device"]
-        if ready:
-            self.device_status.configure(text="%d device ready. Multi-select kar sakte ho." % len(ready),
-                                         foreground="#080")
-        elif self.devices:
-            self.device_status.configure(text="Device unauthorized/offline. USB debugging allow karo.",
-                                         foreground="#b60")
-        else:
-            self.device_status.configure(text="Koi device nahi mila.", foreground="#b60")
-        self._log(None, "[i] Devices refresh: %d mile." % len(self.devices))
+            ready = [d for d in self.devices if d["state"] == "device"]
+            if ready:
+                self.device_status.configure(text="%d device ready. Multi-select kar sakte ho." % len(ready),
+                                             foreground="#080")
+            elif self.devices:
+                self.device_status.configure(text="Device unauthorized/offline. USB debugging allow karo.",
+                                             foreground="#b60")
+            else:
+                self.device_status.configure(text="Koi device nahi mila.", foreground="#b60")
+            self._log(None, "[i] Devices refresh: %d mile." % len(self.devices))
 
-        if ready:
-            state = "authorized"
-        elif self.devices:
-            state = "unauthorized"
-        else:
-            state = "none"
-        self._ev("device_state_resolved", "info", "Main",
-                 props={"state": state, "device_count": len(self.devices), "ready_count": len(ready)})
-        self._ev("device_refresh_result", "info", "Main",
-                 props={"outcome": "success", "device_count": len(self.devices), "ready_count": len(ready)})
+            if ready:
+                state = "authorized"
+            elif self.devices:
+                state = "unauthorized"
+            else:
+                state = "none"
+            self._ev("device_state_resolved", "info", "Main",
+                     props={"state": state, "device_count": len(self.devices), "ready_count": len(ready)})
+            self._ev("device_refresh_result", "info", "Main",
+                     props={"outcome": "success", "device_count": len(self.devices), "ready_count": len(ready)})
+
+        self._run_bg(lambda: list_devices(adb), done)
 
     # ---------------- run ----------------
     def copy_command(self):
@@ -1557,6 +1696,7 @@ class PhoneMirrorApp:
             return
 
         self._launch_attempt = self.logger.new_attempt_id()
+        self._launch_multi = len(serials) > 1
         self._ev("mirror_requested", "info", "Main", attempt_id=self._launch_attempt,
                  props={"device_count": len(serials), "video_source": self.video_source.get(),
                         "connection_mode": self.connection_mode.get()})
@@ -1621,16 +1761,25 @@ class PhoneMirrorApp:
             self.log_q.put(("end", serial))
 
     def _poll_log(self):
+        """Main-thread pump: log lines, session ends, aur background callbacks.
+        Har cycle me limited items process hote hain taaki UI responsive rahe."""
+        processed = 0
         try:
-            while True:
+            while processed < 400:
                 item = self.log_q.get_nowait()
+                processed += 1
                 if item[0] == "line":
                     self._log(item[1], item[2])
                 elif item[0] == "end":
                     self._on_session_end(item[1])
+                elif item[0] == "call":
+                    try:
+                        item[1]()
+                    except Exception:  # noqa: BLE001
+                        pass
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_log)
+        self.root.after(50, self._poll_log)
 
     def _on_session_end(self, serial):
         sess = self.sessions.get(serial)
@@ -1644,7 +1793,7 @@ class PhoneMirrorApp:
                 sess.reconnect_attempts = 0
 
         if sess.running_intent and not sess.user_stopped and self.auto_reconnect.get():
-            delay = int(self.reconnect_delay.get())
+            delay = self._int_var(self.reconnect_delay, 3, 1, 600)
             self._log(serial, "[i] Auto-reconnect %d s me..." % delay)
             self.root.after(delay * 1000, lambda: self._attempt_reconnect(serial))
         else:
@@ -1655,7 +1804,7 @@ class PhoneMirrorApp:
         sess = self.sessions.get(serial)
         if sess is None or not sess.running_intent or sess.user_stopped or not self.auto_reconnect.get():
             return
-        maxa = int(self.reconnect_max.get())
+        maxa = self._int_var(self.reconnect_max, 0, 0, 100000)
         if maxa and sess.reconnect_attempts >= maxa:
             self._log(serial, "[!] Max attempts (%d) pura." % maxa)
             sess.running_intent = False
@@ -1663,29 +1812,42 @@ class PhoneMirrorApp:
             return
 
         adb = self._adb()
-        present = False
-        if adb:
-            devs, _ = list_devices(adb)
-            present = any(d["serial"] == serial and d["state"] == "device" for d in devs)
+        if not adb:
+            self._log(serial, "[!] adb nahi mila, reconnect rok raha hoon.")
+            sess.running_intent = False
+            self._refresh_buttons()
+            return
 
-        if present:
-            sess.reconnect_attempts += 1
-            self._log(serial, "[i] Reconnect attempt #%d" % sess.reconnect_attempts)
-            att = self.logger.new_attempt_id("rc")
-            self._ev("reconnect_attempt", "info", "Main", attempt_id=att,
-                     props={"attempt_number": sess.reconnect_attempts,
-                            "device": self._dev_pseudonym(serial)})
-            # user-friendliness signal: reconnect_loop
-            if sess.reconnect_attempts >= 3:
-                self._ev("reconnect_loop", "warn", "Main", attempt_id=att,
-                         props={"attempt_count": sess.reconnect_attempts,
+        def work():
+            devs, _ = list_devices(adb)
+            return any(d["serial"] == serial and d["state"] == "device" for d in devs)
+
+        def done(ok, present):
+            sess2 = self.sessions.get(serial)
+            if (sess2 is None or not sess2.running_intent
+                    or sess2.user_stopped or not self.auto_reconnect.get()):
+                return
+            if ok and present:
+                sess2.reconnect_attempts += 1
+                self._log(serial, "[i] Reconnect attempt #%d" % sess2.reconnect_attempts)
+                att = self.logger.new_attempt_id("rc")
+                self._ev("reconnect_attempt", "info", "Main", attempt_id=att,
+                         props={"attempt_number": sess2.reconnect_attempts,
                                 "device": self._dev_pseudonym(serial)})
-            self._start_session(serial)
-            self._ev("reconnect_result", "info", "Main", attempt_id=att, props={"outcome": "success"})
-        else:
-            delay = int(self.reconnect_delay.get())
-            self._log(serial, "[i] Device nahi mila, %d s baad try..." % delay)
-            self.root.after(delay * 1000, lambda: self._attempt_reconnect(serial))
+                # user-friendliness signal: reconnect_loop
+                if sess2.reconnect_attempts >= 3:
+                    self._ev("reconnect_loop", "warn", "Main", attempt_id=att,
+                             props={"attempt_count": sess2.reconnect_attempts,
+                                    "device": self._dev_pseudonym(serial)})
+                self._start_session(serial)
+                self._ev("reconnect_result", "info", "Main", attempt_id=att,
+                         props={"outcome": "success"})
+            else:
+                delay = self._int_var(self.reconnect_delay, 3, 1, 600)
+                self._log(serial, "[i] Device nahi mila, %d s baad try..." % delay)
+                self.root.after(delay * 1000, lambda: self._attempt_reconnect(serial))
+
+        self._run_bg(work, done)
 
     def _refresh_buttons(self):
         active = any(s.active() for s in self.sessions.values())
@@ -1714,6 +1876,10 @@ class PhoneMirrorApp:
                 except Exception:  # noqa: BLE001
                     pass
         self._ev("session_end", "info", "Main", props={"reason": "user_close"})
+        try:
+            self.filelog.close()
+        except Exception:  # noqa: BLE001
+            pass
         self.root.destroy()
 
 
@@ -1723,7 +1889,28 @@ def main():
         ttk.Style().theme_use("vista" if IS_WINDOWS else "clam")
     except tk.TclError:
         pass
-    app = PhoneMirrorApp(root)
+    try:
+        app = PhoneMirrorApp(root)
+    except Exception:  # noqa: BLE001
+        # Startup crash: file me likho + user ko dikhao (silent death se bacho)
+        tb = traceback.format_exc()
+        try:
+            crash_dir = os.path.join(default_base_dir(), "logs")
+            os.makedirs(crash_dir, exist_ok=True)
+            with open(os.path.join(crash_dir, "startup-crash.log"), "a", encoding="utf-8") as f:
+                f.write("%s\n%s\n\n" % (utc_now(), tb))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            messagebox.showerror("PhoneMirror start nahi ho paya",
+                                 "Startup error:\n\n%s" % tb[-1200:])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+        return
     root.report_callback_exception = app._tk_exception
     root.protocol("WM_DELETE_WINDOW", app.on_close)
     root.mainloop()

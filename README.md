@@ -95,6 +95,18 @@ Mouse = touch, keyboard = typing (scrcpy me default on). App se:
 Disconnect hone par app khud `adb` se check karke us device ka scrcpy dobara
 launch kar deta hai. Retry delay aur max attempts tunable.
 
+## Reliability notes
+
+- Saare `adb` / `scrcpy` calls **background threads** me chalte hain (result main thread par queue se aata hai) —
+  UI kabhi freeze nahi hoti, chahe adb slow ya hang ho.
+- Numeric fields (port, retry delay, max attempts, size, fps) me galat text daalo to **crash nahi** —
+  safe default + range clamp lagta hai.
+- Startup crash ho to `logs/startup-crash.log` me likha jaata hai aur ek error dialog dikhta hai
+  (silent death nahi).
+- Log files ke handles **open rehte hain** (per-line open/close nahi) — high-frequency logging smooth,
+  aur daily rotate par purane handles band hoke naye khul jaate hain.
+- Report banana ab **non-blocking** hai (scrcpy/adb version background me cache hote hain).
+
 ## Diagnostics (logs export + email)
 
 App me **⚙ Diagnostics** button hai (neeche daayein). Yeh ek alag window kholta hai jahan se:
