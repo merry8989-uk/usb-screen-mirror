@@ -43,7 +43,7 @@ from tkinter import ttk, messagebox, filedialog
 from urllib.parse import quote
 
 APP_TITLE = "PhoneMirror  -  Screen Mirror (scrcpy wrapper)"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 DIAG_EMAIL = "br19shc39@gmail.com"
 
 IS_WINDOWS = (os.name == "nt")
@@ -811,7 +811,7 @@ class DiagnosticsWindow(tk.Toplevel):
             self.status.configure(text="Saved: %s" % path)
             self.app._log(None, "[i] Diagnostics saved: %s" % path)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Save fail", str(exc))
+            self.app.toast("Save fail: %s" % exc, "error")
 
     def email(self, gmail):
         try:
@@ -819,7 +819,7 @@ class DiagnosticsWindow(tk.Toplevel):
             self._last_path = path
             self.status.configure(text="Email compose khula. Report: %s" % path)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Email fail", str(exc))
+            self.app.toast("Email fail: %s" % exc, "error")
 
     def open_folder(self):
         d = self.app.diagnostics_dir()
@@ -847,7 +847,7 @@ class DiagnosticsWindow(tk.Toplevel):
             self._last_path = path
             self.status.configure(text="Share bundle: %s (path clipboard me)" % path)
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("Share fail", str(exc))
+            self.app.toast("Share fail: %s" % exc, "error")
 
 
 # --------------------------------------------------------------------------- #
@@ -875,6 +875,8 @@ class PhoneMirrorApp:
         self._launch_multi = False
         self._refreshing = False
         self._probe = {"scrcpy_version": "", "adb_version": ""}
+        self._want_serials = []
+        self._toast_job = None
         self.session_id = "sess_" + _rand_hex(12)
         self.logger = StructuredLogger(self.session_id)
         self.filelog = FileLogWriter(os.path.join(default_base_dir(), "logs"))
@@ -913,14 +915,17 @@ class PhoneMirrorApp:
         self.print_fps = tk.BooleanVar(value=False)
 
         self.auto_reconnect = tk.BooleanVar(value=True)
+        self.auto_refresh = tk.BooleanVar(value=True)
         self.reconnect_delay = tk.IntVar(value=3)
         self.reconnect_max = tk.IntVar(value=0)
 
         self._build_ui()
+        self._apply_saved(cfg.get("settings", {}))
         self._poll_log()
         self._ev("session_start", "info", "Main", props={"start_type": "cold"})
         self.refresh_probe()
         self.refresh_devices()
+        self.root.after(5000, self._auto_refresh_tick)
 
     # ---------------- structured events ----------------
     def _ev(self, event_name, log_level, screen_or_route, attempt_id=None, props=None):
@@ -938,6 +943,28 @@ class PhoneMirrorApp:
 
     def _dev_pseudonym(self, serial):
         return salted_hash(serial, self._salt)
+
+    def toast(self, msg, level="info", ms=4000):
+        """Non-modal notification - status bar ke upar chhota toast (flow block nahi hota)."""
+        colors = {"info": "#2b6cb0", "warn": "#b7791f", "error": "#c53030", "success": "#2f855a"}
+        try:
+            self._toast_lbl.configure(text=msg, background=colors.get(level, "#2b6cb0"))
+            self._toast_lbl.place(relx=0.0, rely=1.0, anchor="sw", relwidth=1.0)
+            if getattr(self, "_toast_job", None):
+                try:
+                    self.root.after_cancel(self._toast_job)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._toast_job = self.root.after(ms, self._hide_toast)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _hide_toast(self):
+        try:
+            self._toast_lbl.place_forget()
+        except Exception:  # noqa: BLE001
+            pass
+        self._toast_job = None
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -961,8 +988,9 @@ class PhoneMirrorApp:
         sb.grid(row=0, column=1, sticky="ns", pady=6)
         self.device_list.configure(yscrollcommand=sb.set)
         ttk.Button(dev, text="Refresh", command=self.refresh_devices).grid(row=0, column=2, padx=6, sticky="n")
+        ttk.Checkbutton(dev, text="Auto-refresh", variable=self.auto_refresh).grid(row=1, column=2, padx=6, sticky="e")
         self.device_status = ttk.Label(dev, text="", foreground="#666")
-        self.device_status.grid(row=1, column=0, columnspan=3, sticky="w", padx=8)
+        self.device_status.grid(row=1, column=0, columnspan=2, sticky="w", padx=8)
         dev.columnconfigure(0, weight=1)
 
         conn = ttk.LabelFrame(self.root, text="3. Connection (USB / Wi-Fi)")
@@ -1091,6 +1119,9 @@ class PhoneMirrorApp:
 
         self.status = ttk.Label(self.root, text="Ready.", anchor="w", relief="sunken")
         self.status.pack(fill="x", side="bottom")
+        # non-modal toast (status bar ke upar)
+        self._toast_lbl = tk.Label(self.root, text="", anchor="w", padx=10, pady=6,
+                                   background="#2b6cb0", foreground="white")
 
     # ---------------- small helpers ----------------
     def _on_size(self, _val):
@@ -1406,6 +1437,96 @@ class PhoneMirrorApp:
         self._log(None, "[!] Unhandled error: %s: %s" % (getattr(exc, "__name__", exc), val))
 
     # ---------------- presets / settings ----------------
+    def _apply_saved(self, s):
+        """config se saved settings wapas lagao (restart par yaad rahein)."""
+        if not isinstance(s, dict):
+            return
+
+        def sset(var, key, cast=None):
+            if key in s and s[key] is not None:
+                try:
+                    var.set(cast(s[key]) if cast else s[key])
+                except Exception:  # noqa: BLE001
+                    pass
+
+        sset(self.video_source, "video_source")
+        sset(self.max_size, "max_size", int)
+        sset(self.bitrate, "bitrate")
+        sset(self.max_fps, "max_fps", int)
+        sset(self.codec, "codec")
+        sset(self.camera_facing, "camera_facing")
+        sset(self.camera_size, "camera_size")
+        sset(self.camera_fps, "camera_fps", int)
+        sset(self.audio, "audio", bool)
+        sset(self.audio_codec, "audio_codec")
+        sset(self.audio_bitrate, "audio_bitrate")
+        sset(self.audio_buffer, "audio_buffer", int)
+        sset(self.record, "record", bool)
+        sset(self.record_path, "record_path")
+        sset(self.no_control, "no_control", bool)
+        sset(self.keyboard_mode, "keyboard_mode")
+        sset(self.turn_screen_off, "turn_screen_off", bool)
+        sset(self.stay_awake, "stay_awake", bool)
+        sset(self.always_on_top, "always_on_top", bool)
+        sset(self.print_fps, "print_fps", bool)
+        sset(self.auto_reconnect, "auto_reconnect", bool)
+        sset(self.auto_refresh, "auto_refresh", bool)
+        sset(self.reconnect_delay, "reconnect_delay", int)
+        sset(self.reconnect_max, "reconnect_max", int)
+        sset(self.connection_mode, "connection_mode")
+        sset(self.wifi_ip, "wifi_ip")
+        sset(self.wifi_port, "wifi_port", int)
+        sset(self.scrcpy_path, "scrcpy_path")
+        sset(self.adb_path, "adb_path")
+        self._want_serials = list(s.get("selected_serials") or [])
+        # derived UI sync
+        try:
+            self._on_size(None)
+            self._on_source()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def save_settings(self):
+        """Saari settings + last device config me save karo."""
+        try:
+            cfg = load_config()
+            cfg["settings"] = {
+                "video_source": self.video_source.get(),
+                "max_size": self._int_var(self.max_size, 1024),
+                "bitrate": self.bitrate.get(),
+                "max_fps": self._int_var(self.max_fps, 60),
+                "codec": self.codec.get(),
+                "camera_facing": self.camera_facing.get(),
+                "camera_size": self.camera_size.get(),
+                "camera_fps": self._int_var(self.camera_fps, 30),
+                "audio": bool(self.audio.get()),
+                "audio_codec": self.audio_codec.get(),
+                "audio_bitrate": self.audio_bitrate.get(),
+                "audio_buffer": self._int_var(self.audio_buffer, 50),
+                "record": bool(self.record.get()),
+                "record_path": self.record_path.get(),
+                "no_control": bool(self.no_control.get()),
+                "keyboard_mode": self.keyboard_mode.get(),
+                "turn_screen_off": bool(self.turn_screen_off.get()),
+                "stay_awake": bool(self.stay_awake.get()),
+                "always_on_top": bool(self.always_on_top.get()),
+                "print_fps": bool(self.print_fps.get()),
+                "auto_reconnect": bool(self.auto_reconnect.get()),
+                "auto_refresh": bool(self.auto_refresh.get()),
+                "reconnect_delay": self._int_var(self.reconnect_delay, 3),
+                "reconnect_max": self._int_var(self.reconnect_max, 0),
+                "connection_mode": self.connection_mode.get(),
+                "wifi_ip": self.wifi_ip.get(),
+                "wifi_port": self._int_var(self.wifi_port, 5555),
+                "scrcpy_path": self.scrcpy_path.get(),
+                "adb_path": self.adb_path.get(),
+                "selected_serials": self.selected_serials(),
+            }
+            cfg["diagnostics_enabled"] = bool(self.diag_enabled.get())
+            save_config(cfg)
+        except Exception:  # noqa: BLE001
+            pass
+
     def apply_preset(self, name):
         p = PRESETS[name]
         self.max_size.set(p["max_size"])
@@ -1419,6 +1540,7 @@ class PhoneMirrorApp:
         self.audio_buffer.set(p["audio_buffer"])
         self.preset_desc.configure(text="[%s]  %s" % (name, p["desc"]))
         self.status.configure(text="Preset lagaya: %s" % name)
+        self.save_settings()
 
     def _int_var(self, var, default=0, lo=None, hi=None):
         """IntVar/Entry se safe integer nikalo.
@@ -1456,6 +1578,7 @@ class PhoneMirrorApp:
             "always_on_top": self.always_on_top.get(),
             "print_fps": self.print_fps.get(),
             "auto_reconnect": self.auto_reconnect.get(),
+            "auto_refresh": self.auto_refresh.get(),
             "reconnect_delay": self._int_var(self.reconnect_delay, 3, 1, 600),
             "reconnect_max": self._int_var(self.reconnect_max, 0, 0, 100000),
             "connection_mode": self.connection_mode.get(),
@@ -1508,8 +1631,7 @@ class PhoneMirrorApp:
                 self._log(None, "[!] IP detect nahi hua.")
                 self._ev("error_state_shown", "error", "Main",
                          props={"error_code": "ip_not_found", "message_key": "ip_not_detected"})
-                messagebox.showwarning("IP nahi mila",
-                                       "Phone Wi-Fi se juda hai aur USB se connected hai?")
+                self.toast("IP detect nahi hua - phone Wi-Fi par hai aur USB se juda hai?", "warn")
 
         self._run_bg(lambda: detect_phone_ip(adb, serial), done)
 
@@ -1522,7 +1644,7 @@ class PhoneMirrorApp:
         if not serial:
             self._ev("error_state_shown", "warn", "Main",
                      props={"error_code": "no_device", "message_key": "no_device_selected"})
-            messagebox.showwarning("Device nahi", "Pehle USB se phone jodo aur Refresh dabao.")
+            self.toast("Pehle USB se phone jodo aur Refresh dabao.", "warn")
             return
         port = self._int_var(self.wifi_port, 5555, 1, 65535)
         self.status.configure(text="Wi-Fi mode on kar rahe hain...")
@@ -1537,7 +1659,7 @@ class PhoneMirrorApp:
             else:
                 self._ev("error_state_shown", "error", "Main",
                          props={"error_code": "tcpip_failed", "message_key": "enable_wifi_failed"})
-                messagebox.showerror("Enable Wi-Fi fail", res["out"] or "adb tcpip fail hua.")
+                self.toast("Enable Wi-Fi fail: %s" % (res["out"] or "adb tcpip fail hua"), "error")
 
         self._adb_bg(["-s", serial, "tcpip", str(port)], "Main", done)
 
@@ -1550,7 +1672,7 @@ class PhoneMirrorApp:
         if not ip:
             self._ev("error_state_shown", "warn", "Main",
                      props={"error_code": "no_ip", "message_key": "ip_missing"})
-            messagebox.showwarning("IP nahi", "Phone IP daalo ya 'Auto-detect IP' dabao.")
+            self.toast("Phone IP daalo ya 'Auto-detect IP' dabao.", "warn")
             return
         target = "%s:%d" % (ip, self._int_var(self.wifi_port, 5555, 1, 65535))
         self.status.configure(text="Connect kar rahe hain...")
@@ -1582,8 +1704,9 @@ class PhoneMirrorApp:
         self._adb_bg(["disconnect", target], "Main", done)
 
     # ---------------- devices ----------------
-    def refresh_devices(self):
-        """Devices ko background me scan karo - UI block nahi hoti."""
+    def refresh_devices(self, quiet=False):
+        """Devices ko background me scan karo - UI block nahi hoti.
+        quiet=True (auto-refresh): UI/log sirf tab update hote hain jab device set badla ho."""
         adb = self._adb()
         if not adb:
             self.device_status.configure(text="adb nahi mila. Upar path set karo.", foreground="#b00")
@@ -1594,28 +1717,37 @@ class PhoneMirrorApp:
         if self._refreshing:
             return
         self._refreshing = True
-        self.device_status.configure(text="Devices dhoondh rahe hain...", foreground="#666")
+        if not quiet:
+            self.device_status.configure(text="Devices dhoondh rahe hain...", foreground="#666")
 
         prev = set()
         for i in self.device_list.curselection():
             if i < len(self.devices):
                 prev.add(self.devices[i]["serial"])
+        if not prev:
+            prev = set(self._want_serials or [])   # saved selection restore
+        sig_old = self._dev_sig()
 
         def done(ok, res):
             self._refreshing = False
             if not ok:
-                self.device_status.configure(text="Device list error: %s" % res, foreground="#b00")
-                self._log(None, "[!] %s" % res)
-                self._ev("device_refresh_result", "error", "Main",
-                         props={"outcome": "failed", "error_code": "list_failed"})
+                if not quiet:
+                    self.device_status.configure(text="Device list error: %s" % res, foreground="#b00")
+                    self._log(None, "[!] %s" % res)
+                    self._ev("device_refresh_result", "error", "Main",
+                             props={"outcome": "failed", "error_code": "list_failed"})
                 return
             newdevs, err = res
             if err:
-                self.device_status.configure(text="Device list error: %s" % err, foreground="#b00")
-                self._log(None, "[!] %s" % err)
-                self._ev("device_refresh_result", "error", "Main",
-                         props={"outcome": "failed", "error_code": "list_failed"})
+                if not quiet:
+                    self.device_status.configure(text="Device list error: %s" % err, foreground="#b00")
+                    self._log(None, "[!] %s" % err)
+                    self._ev("device_refresh_result", "error", "Main",
+                             props={"outcome": "failed", "error_code": "list_failed"})
                 return
+
+            if quiet and self._dev_sig(newdevs) == sig_old:
+                return                      # kuch nahi badla -> UI/log churn nahi
 
             self.devices = newdevs
             self.device_list.delete(0, "end")
@@ -1654,6 +1786,22 @@ class PhoneMirrorApp:
 
         self._run_bg(lambda: list_devices(adb), done)
 
+    def _dev_sig(self, devs=None):
+        devs = self.devices if devs is None else devs
+        return tuple(sorted((d.get("serial", ""), d.get("state", "")) for d in devs))
+
+    def _auto_refresh_tick(self):
+        """Har 5s me quiet refresh - naya phone khud dikh jaye."""
+        try:
+            if self.auto_refresh.get() and not self._refreshing:
+                self.refresh_devices(quiet=True)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.root.after(5000, self._auto_refresh_tick)
+        except Exception:  # noqa: BLE001
+            pass
+
     # ---------------- run ----------------
     def copy_command(self):
         scrcpy = self.scrcpy_path.get().strip() or "scrcpy"
@@ -1685,18 +1833,19 @@ class PhoneMirrorApp:
         if not scrcpy:
             self._ev("error_state_shown", "error", "Main",
                      props={"error_code": "scrcpy_missing", "message_key": "scrcpy_not_found"})
-            messagebox.showerror("scrcpy nahi mila",
-                                 "scrcpy.exe ka path set karo.\n\nInstall: winget install Genymobile.scrcpy")
+            self.toast("scrcpy nahi mila - path set karo (winget install Genymobile.scrcpy)",
+                       "error", ms=9000)
             return
         serials = self.selected_serials()
         if not serials:
             self._ev("error_state_shown", "warn", "Main",
                      props={"error_code": "no_device", "message_key": "no_device_selected"})
-            messagebox.showwarning("Device nahi", "Pehle device select karo (Ctrl/Shift + click).")
+            self.toast("Pehle device select karo (Ctrl/Shift + click).", "warn")
             return
 
         self._launch_attempt = self.logger.new_attempt_id()
         self._launch_multi = len(serials) > 1
+        self.save_settings()
         self._ev("mirror_requested", "info", "Main", attempt_id=self._launch_attempt,
                  props={"device_count": len(serials), "video_source": self.video_source.get(),
                         "connection_mode": self.connection_mode.get()})
@@ -1876,6 +2025,7 @@ class PhoneMirrorApp:
                 except Exception:  # noqa: BLE001
                     pass
         self._ev("session_end", "info", "Main", props={"reason": "user_close"})
+        self.save_settings()
         try:
             self.filelog.close()
         except Exception:  # noqa: BLE001

@@ -106,6 +106,13 @@ launch kar deta hai. Retry delay aur max attempts tunable.
 - Log files ke handles **open rehte hain** (per-line open/close nahi) — high-frequency logging smooth,
   aur daily rotate par purane handles band hoke naye khul jaate hain.
 - Report banana ab **non-blocking** hai (scrcpy/adb version background me cache hote hain).
+- **Settings yaad rehti hain** — saari settings (preset, video/audio, recording, auto-reconnect,
+  Wi-Fi IP/port, tool paths) aur last device selection `~/.phonemirror/config.json` me save hoti hain
+  aur app dobara kholne par wapas lag jaati hain.
+- **Device auto-refresh** — har 5 second background me quiet scan (Device frame me checkbox se on/off).
+  Naya phone lagao to khud list me aa jaata hai; jab kuch na badle to UI/log churn nahi hota.
+- **Toast notifications** — warning/error ab chhota non-modal toast dikhata hai (flow block nahi hota).
+  Sirf destructive confirm (Clean) aur startup crash modal rehte hain.
 
 ## Diagnostics (logs export + email)
 
