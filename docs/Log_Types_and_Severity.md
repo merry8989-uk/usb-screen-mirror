@@ -44,7 +44,7 @@ Yeh desktop app hai (koi server/DB/web analytics nahi), isliye applicable catego
 | Category | PhoneMirror events |
 |---|---|
 | application | `session_start`, `session_end`, `mirror_result`, `device_state_resolved`, `device_refresh_result` |
-| error | `error_state_shown`, `crash` |
+| error | `error_state_shown`, `crash_report` (crash report file + event) |
 | security | `device_authorization_failed` (USB debugging permission nahi mili) |
 | performance | `performance_marker` (adb_command / device_scan / export duration) |
 | user_activity | `screen_view`, `mirror_requested`, `preset_applied` |
@@ -53,8 +53,22 @@ Yeh desktop app hai (koi server/DB/web analytics nahi), isliye applicable catego
 | audit | `settings_changed`, `diagnostics_toggled`, `diagnostics_cleaned`, `export_saved`, `email_compose`, `share_bundle` |
 | background_job | `reconnect_attempt`, `reconnect_result`, `reconnect_loop`, `tool_probe` |
 | debug_trace | `queue_drain` (trace level, sirf bade backlog par) |
+| analytics | `analytics_snapshot` — usage counters (mirrors started/succeeded/failed, devices seen, reconnects, exports, emails, shares, errors, crashes). Metrics ko raw logs se alag rakha gaya hai. |
 | database | N/A — app me koi database nahi |
-| analytics | N/A — koi web analytics/business metrics nahi |
+
+### Crash reporting
+
+Uncaught exceptions (Tk callbacks + startup) par:
+
+- `crash_report` event (`category: error`) — `exception_type`, `stack_trace_hash`, `last_screen`,
+  `last_action`, `report_file` (raw traceback event me **nahi** jaata, sirf hash).
+- Poora report file — `crash-reports/crash-<timestamp>.txt` (traceback + context), jo zip bundle me
+  `crash_reports/` ke andar attach ho jaati hai.
+
+### Analytics
+
+Counters app ke andar maintain hote hain aur `analytics_snapshot` event me jaate hain (Diagnostics
+kholne par aur session end par). Report me ek alag **Analytics** section/sheet bhi hota hai.
 
 Severity: `trace` / `debug` / `info` / `warn` / `error` / `fatal` (schema me `log_level` aur
 `severity` dono same value carry karte hain).

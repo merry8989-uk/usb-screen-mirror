@@ -160,7 +160,7 @@ log taxonomy follow karta hai (dekho [`docs/ProGallery_Logging_Spec.md`](docs/Pr
   (launch / reconnect jaise actions ko intent→outcome se jodta hai).
 - **Categories (12)** — `application`, `error`, `security`, `performance`, `user_activity`,
   `infrastructure`, `api_network`, `database`, `audit`, `analytics`, `background_job`, `debug_trace`.
-  App in me se **10 applicable** categories emit karti hai (`database` / `analytics` is app me nahi).
+  App in me se **11 applicable** categories emit karti hai (sirf `database` N/A hai — is app me DB nahi).
 - **Severities (6)** — `trace` / `debug` / `info` / `warn` / `error` / `fatal`, deliberately.
 - **Sampling** — warn/error/fatal 100%, trace/debug/info sampled (rate configurable).
 - **Retention** — max events + 7 din (auto-purge).
@@ -170,7 +170,13 @@ log taxonomy follow karta hai (dekho [`docs/ProGallery_Logging_Spec.md`](docs/Pr
   `mirror_requested` / `mirror_result`, `reconnect_attempt` / `reconnect_result` / `reconnect_loop`,
   `adb_command`, `performance_marker`, `settings_changed`, `diagnostics_toggled`,
   `diagnostics_cleaned`, `export_saved`, `email_compose`, `share_bundle`, `tool_probe`,
-  `error_state_shown`, `crash`, `queue_drain`, `session_end`.
+  `error_state_shown`, `crash_report`, `analytics_snapshot`, `queue_drain`, `session_end`.
+- **Crash reporting** — uncaught exception par `crash_report` event (type + `stack_trace_hash` +
+  `last_screen` / `last_action`) aur ek local file `crash-reports/crash-<ts>.txt` (poora traceback).
+  Raw traceback event me nahi jaata; file zip bundle me `crash_reports/` ke andar chali jaati hai.
+- **Analytics** — usage counters (`mirrors_started/succeeded/failed`, `devices_seen`, `reconnects`,
+  `exports`, `emails`, `shares`, `errors`, `crashes`) `analytics_snapshot` event me, aur report me
+  alag **Analytics** section/sheet.
 - **CI validation** — `logschema/validate_events.py --selftest` har build par events ko schema ke
   against check karta hai; fail hone par build ruk jaata hai.
 - **Export** — `.jsonl` (ek event per line) ya `.json` (poore report me `events`), aur `.xlsx` me

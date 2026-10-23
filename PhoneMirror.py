@@ -43,7 +43,7 @@ from tkinter import ttk, messagebox, filedialog
 from urllib.parse import quote
 
 APP_TITLE = "PhoneMirror  -  Screen Mirror (scrcpy wrapper)"
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.10.0"
 DIAG_EMAIL = "br19shc39@gmail.com"
 
 IS_WINDOWS = (os.name == "nt")
@@ -120,8 +120,9 @@ EVENT_CATEGORY = {
     "tool_probe": "background_job",
     "environment_snapshot": "infrastructure",
     "error_state_shown": "error",
-    "crash": "error",
+    "crash_report": "error",
     "queue_drain": "debug_trace",
+    "analytics_snapshot": "analytics",
 }
 
 
@@ -297,7 +298,10 @@ def sample_events(session_id="sess_sample"):
     e("share_bundle", "info", "Diagnostics", props={"outcome": "success", "format": "zip"})
     # error
     e("error_state_shown", "error", "Main", props={"error_code": "scrcpy_missing"})
-    e("crash", "fatal", "Main", props={"fatal": True, "exception_type": "RuntimeError"})
+    e("crash_report", "fatal", "Main", props={"fatal": True, "exception_type": "RuntimeError",
+                                             "stack_trace_hash": "abc123", "report_file": "crash-x.txt"})
+    # analytics
+    e("analytics_snapshot", "info", "Main", props={"mirrors_started": 3, "exports": 1})
     # debug_trace
     e("queue_drain", "trace", "Main", props={"processed": 250})
     return lg.events
@@ -399,6 +403,44 @@ def default_base_dir():
     home = os.path.expanduser("~")
     docs = os.path.join(home, "Documents")
     return os.path.join(docs, "PhoneMirror") if os.path.isdir(docs) else os.path.join(home, "PhoneMirror")
+
+
+def crash_reports_dir(base=None):
+    """Crash reports ki folder (local artifact - user attach kar sakta hai)."""
+    d = os.path.join(base or default_base_dir(), "crash-reports")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return d
+
+
+def write_crash_report(exc_type, exc_value, tb_text, context=None, base=None):
+    """Crash ka poora report file likho (traceback + context). Returns path or ''.
+    Note: file local rehti hai (raw traceback), events me sirf hash jaata hai."""
+    name = "crash-%s.txt" % time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(crash_reports_dir(base), name)
+    lines = [
+        "PhoneMirror crash report",
+        "time: %s" % utc_now(),
+        "app: %s v%s (%s)" % (APP_TITLE, APP_VERSION, APP_ID),
+        "os: %s %s (%s)" % (platform.system(), platform.release(), platform.machine()),
+        "python: %s" % sys.version.split()[0],
+        "exception: %s" % exc_type,
+        "message: %s" % exc_value,
+    ]
+    for k, v in (context or {}).items():
+        lines.append("%s: %s" % (k, v))
+    lines.append("")
+    lines.append("--- traceback ---")
+    lines.append((tb_text or "").rstrip())
+    lines.append("")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return path
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -608,6 +650,17 @@ def render_txt(rep):
     for k, v in rep["settings"].items():
         L.append("  %-18s %s" % (k + ":", v))
     L.append("")
+    L.append("== Analytics (metrics) ==")
+    for k, v in (rep.get("analytics") or {}).items():
+        L.append("  %-20s %s" % (k + ":", v))
+    L.append("")
+    cr = rep.get("crash_reports") or []
+    L.append("== Crash reports (%d) ==" % len(cr))
+    for n in cr:
+        L.append("  %s" % n)
+    if not cr:
+        L.append("  (koi crash report nahi)")
+    L.append("")
     L.append("== Structured events (%d) ==" % len(rep.get("events", [])))
     if not rep.get("events"):
         L.append("  (kuch nahi - diagnostics OFF ho sakta hai)")
@@ -656,6 +709,22 @@ def render_md(rep):
     L.append("|---|---|")
     for k, v in rep["settings"].items():
         L.append("| %s | %s |" % (k, v))
+    L.append("")
+    L.append("## Analytics (metrics)")
+    L.append("")
+    L.append("| Metric | Value |")
+    L.append("|---|---|")
+    for k, v in (rep.get("analytics") or {}).items():
+        L.append("| %s | %s |" % (k, v))
+    L.append("")
+    cr = rep.get("crash_reports") or []
+    L.append("## Crash reports (%d)" % len(cr))
+    L.append("")
+    if cr:
+        for n in cr:
+            L.append("- `%s`" % n)
+    else:
+        L.append("_koi crash report nahi_")
     L.append("")
     L.append("## Structured events (%d)" % len(rep.get("events", [])))
     L.append("")
@@ -729,6 +798,16 @@ def write_xlsx(rep, path):
     for k, v in rep["settings"].items():
         st.append([k, str(v)])
 
+    an = wb.create_sheet("Analytics")
+    an.append(["Metric", "Value"])
+    for k, v in (rep.get("analytics") or {}).items():
+        an.append([k, v])
+
+    crs = wb.create_sheet("CrashReports")
+    crs.append(["Crash report file"])
+    for n in (rep.get("crash_reports") or []):
+        crs.append([n])
+
     ev = wb.create_sheet("Events")
     ev.append(["timestamp", "log_level", "event_name", "screen_or_route", "attempt_id", "session_id"])
     for e in rep.get("events", []):
@@ -756,8 +835,8 @@ def write_jsonl(rep, path):
         f.write("\n".join(json.dumps(e, ensure_ascii=False) for e in rep.get("events", [])))
 
 
-def write_zip(rep, path, logs_dir=None):
-    """Poora bundle ek zip me: report.md/txt/json + events.jsonl + device logs."""
+def write_zip(rep, path, logs_dir=None, crash_dir=None):
+    """Poora bundle ek zip me: report + events + device logs + crash reports."""
     import zipfile  # noqa: WPS433
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("report.md", render_md(rep))
@@ -770,6 +849,13 @@ def write_zip(rep, path, logs_dir=None):
                 if name.startswith("events-") or name.startswith("phonemirror-"):
                     try:
                         z.write(os.path.join(logs_dir, name), arcname="device_logs/" + name)
+                    except Exception:  # noqa: BLE001
+                        pass
+        if crash_dir and os.path.isdir(crash_dir):
+            for name in sorted(os.listdir(crash_dir)):
+                if name.startswith("crash-"):
+                    try:
+                        z.write(os.path.join(crash_dir, name), arcname="crash_reports/" + name)
                     except Exception:  # noqa: BLE001
                         pass
 
@@ -959,6 +1045,14 @@ class PhoneMirrorApp:
         self._probe = {"scrcpy_version": "", "adb_version": ""}
         self._want_serials = []
         self._toast_job = None
+        self._last_screen = "Main"
+        self._last_action = "app_start"
+        # analytics counters (metrics; raw logs se alag)
+        self.stats = {
+            "mirrors_started": 0, "mirrors_succeeded": 0, "mirrors_failed": 0,
+            "devices_seen": 0, "reconnects": 0, "exports": 0, "emails": 0,
+            "shares": 0, "errors": 0, "crashes": 0,
+        }
         self.session_id = "sess_" + _rand_hex(12)
         self.logger = StructuredLogger(self.session_id)
         self.filelog = FileLogWriter(os.path.join(default_base_dir(), "logs"))
@@ -1019,6 +1113,8 @@ class PhoneMirrorApp:
         category event_name se infer hoti hai (ya explicit override)."""
         if not self.diag_enabled.get():
             return None
+        if log_level in ("error", "fatal"):
+            self.stats["errors"] += 1
         ev = self.logger.log(event_name, log_level, screen_or_route,
                              attempt_id=attempt_id, props=props,
                              category=category_for(event_name, category), message=message)
@@ -1053,6 +1149,14 @@ class PhoneMirrorApp:
         except Exception:  # noqa: BLE001
             pass
         self._toast_job = None
+
+    def analytics_snapshot(self, where="manual"):
+        """Analytics metrics ka point-in-time snapshot event (category: analytics)."""
+        props = dict(self.stats)
+        props["where"] = where
+        props["session_id"] = self.session_id
+        self._ev("analytics_snapshot", "info", "Main", props=props)
+        return dict(self.stats)
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -1356,6 +1460,9 @@ class PhoneMirrorApp:
             pass
         return d
 
+    def crash_reports_dir(self):
+        return crash_reports_dir(self.diagnostics_dir())
+
     def refresh_probe(self):
         """scrcpy/adb version background me probe karo (UI block na ho)."""
         def work():
@@ -1419,9 +1526,18 @@ class PhoneMirrorApp:
             },
             "devices": devices,
             "settings": self.current_settings(),
+            "analytics": dict(self.stats),
+            "crash_reports": self._list_crash_reports(),
             "events": list(self.logger.events),
             "log": list(self.diag),
         }
+
+    def _list_crash_reports(self):
+        try:
+            return sorted(n for n in os.listdir(self.crash_reports_dir())
+                          if n.startswith("crash-"))
+        except Exception:  # noqa: BLE001
+            return []
 
     def save_report(self, rep, path, fmt):
         fmt = (fmt or "txt").lower().lstrip(".")
@@ -1441,7 +1557,7 @@ class PhoneMirrorApp:
             elif fmt == "csv":
                 write_csv(rep, path)
             elif fmt == "zip":
-                write_zip(rep, path, self.logs_dir())
+                write_zip(rep, path, self.logs_dir(), self.crash_reports_dir())
             elif fmt == "xlsx":
                 try:
                     write_xlsx(rep, path)
@@ -1459,6 +1575,7 @@ class PhoneMirrorApp:
                      props={"format": fmt, "outcome": "failed", "error_code": "export_error"})
             raise
         dur = int((time.time() - t0) * 1000)
+        self.stats["exports"] += 1
         self._ev("export_saved", "info", "Diagnostics",
                  props={"format": fmt, "outcome": "success", "duration_ms": dur})
         self._ev("performance_marker", "info", "Diagnostics",
@@ -1470,7 +1587,7 @@ class PhoneMirrorApp:
         ts = time.strftime("%Y%m%d_%H%M%S")
         path = os.path.join(d, "PhoneMirror_diagnostics_%s.zip" % ts)
         try:
-            write_zip(rep, path, self.logs_dir())
+            write_zip(rep, path, self.logs_dir(), self.crash_reports_dir())
         except Exception as exc:  # noqa: BLE001
             self._ev("email_compose", "error", "Diagnostics",
                      props={"outcome": "failed", "error_code": "report_save_failed"})
@@ -1492,6 +1609,7 @@ class PhoneMirrorApp:
             url = "mailto:%s?subject=%s&body=%s" % (DIAG_EMAIL, quote(subj), quote(body))
         webbrowser.open(url)
 
+        self.stats["emails"] += 1
         self._ev("email_compose", "info", "Diagnostics",
                  props={"outcome": "success", "channel": "gmail" if gmail else "mailto"})
         self._log(None, "[i] Email compose khula -> %s (report: %s)" % (DIAG_EMAIL, path))
@@ -1505,7 +1623,7 @@ class PhoneMirrorApp:
         d = self.diagnostics_dir()
         ts = time.strftime("%Y%m%d_%H%M%S")
         path = os.path.join(d, "PhoneMirror_diagnostics_%s.zip" % ts)
-        write_zip(rep, path, self.logs_dir())
+        write_zip(rep, path, self.logs_dir(), self.crash_reports_dir())
         try:
             self.root.clipboard_clear()
             self.root.clipboard_append(path)
@@ -1516,6 +1634,7 @@ class PhoneMirrorApp:
                 os.startfile(d)  # noqa: S606
         except Exception:  # noqa: BLE001
             pass
+        self.stats["shares"] += 1
         self._ev("share_bundle", "info", "Diagnostics",
                  props={"outcome": "success", "format": "zip", "channel": "clipboard+folder"})
         self._log(None, "[i] Share bundle ready: %s (path clipboard me)" % path)
@@ -1523,8 +1642,11 @@ class PhoneMirrorApp:
         return path
 
     def open_diagnostics(self):
+        self._last_screen = "Diagnostics"
+        self._last_action = "open_diagnostics"
         self._ev("screen_view", "info", "Diagnostics",
                  props={"screen_name": "Diagnostics", "previous_screen": "Main"})
+        self.analytics_snapshot("diagnostics_open")
         self.refresh_probe()
         if self._diag_win is not None and self._diag_win.winfo_exists():
             self._diag_win.lift()
@@ -1533,14 +1655,26 @@ class PhoneMirrorApp:
         self._diag_win = DiagnosticsWindow(self)
 
     def _tk_exception(self, exc, val, tb):
-        """Tkinter callback me uncaught exception -> crash event (raw stack nahi)."""
+        """Tkinter callback me uncaught exception -> crash report file + crash_report event.
+        Raw traceback sirf local file me jaata hai; event me hash + context."""
         tb_text = "".join(traceback.format_exception(exc, val, tb))
-        self._ev("crash", "error", "Main", props={
+        etype = getattr(exc, "__name__", str(exc))
+        path = write_crash_report(etype, val, tb_text,
+                                  {"session_id": self.session_id,
+                                   "last_screen": self._last_screen,
+                                   "last_action": self._last_action},
+                                  base=self.diagnostics_dir())
+        self.stats["crashes"] += 1
+        self._ev("crash_report", "error", "Main", props={
             "fatal": False,
-            "exception_type": getattr(exc, "__name__", str(exc)),
+            "exception_type": etype,
             "stack_trace_hash": hashlib.sha256(tb_text.encode("utf-8")).hexdigest()[:16],
+            "last_screen": self._last_screen,
+            "last_action": self._last_action,
+            "report_file": os.path.basename(path) if path else "",
         })
-        self._log(None, "[!] Unhandled error: %s: %s" % (getattr(exc, "__name__", exc), val))
+        self._log(None, "[!] Unhandled error: %s: %s (report: %s)"
+                  % (etype, val, os.path.basename(path) if path else "-"))
 
     # ---------------- presets / settings ----------------
     def _apply_saved(self, s):
@@ -1892,6 +2026,7 @@ class PhoneMirrorApp:
                      props={"state": state, "device_count": len(self.devices), "ready_count": len(ready)})
             self._ev("device_refresh_result", "info", "Main",
                      props={"outcome": "success", "device_count": len(self.devices), "ready_count": len(ready)})
+            self.stats["devices_seen"] = max(self.stats["devices_seen"], len(self.devices))
             self._ev("performance_marker", "info", "Main",
                      props={"flow": "device_scan", "duration_ms": int((time.time() - t0) * 1000)})
             if state == "unauthorized":
@@ -1960,6 +2095,8 @@ class PhoneMirrorApp:
 
         self._launch_attempt = self.logger.new_attempt_id()
         self._launch_multi = len(serials) > 1
+        self._last_action = "launch_mirroring"
+        self.stats["mirrors_started"] += len(serials)
         self.save_settings()
         self._ev("mirror_requested", "info", "Main", attempt_id=self._launch_attempt,
                  props={"device_count": len(serials), "video_source": self.video_source.get(),
@@ -1980,6 +2117,7 @@ class PhoneMirrorApp:
         scrcpy = self._resolve_scrcpy()
         if not scrcpy:
             self._log(serial, "[!] scrcpy nahi mila, rok raha hoon.")
+            self.stats["mirrors_failed"] += 1
             self._ev("mirror_result", "error", "Main", attempt_id=self._launch_attempt,
                      props={"outcome": "failed", "error_code": "scrcpy_missing",
                             "device": self._dev_pseudonym(serial)})
@@ -2000,6 +2138,7 @@ class PhoneMirrorApp:
             )
         except Exception as exc:  # noqa: BLE001
             self._log(serial, "[!] Launch fail: %s" % exc)
+            self.stats["mirrors_failed"] += 1
             self._ev("mirror_result", "error", "Main", attempt_id=self._launch_attempt,
                      props={"outcome": "failed", "error_code": "launch_failed",
                             "device": self._dev_pseudonym(serial)})
@@ -2010,6 +2149,7 @@ class PhoneMirrorApp:
 
         sess.start_time = time.time()
         sess.running_intent = True
+        self.stats["mirrors_succeeded"] += 1
         self._ev("mirror_result", "info", "Main", attempt_id=self._launch_attempt,
                  props={"outcome": "success", "device": self._dev_pseudonym(serial)})
         threading.Thread(target=self._reader, args=(serial, sess.proc), daemon=True).start()
@@ -2106,6 +2246,7 @@ class PhoneMirrorApp:
                     self._ev("reconnect_loop", "warn", "Main", attempt_id=att,
                              props={"attempt_count": sess2.reconnect_attempts,
                                     "device": self._dev_pseudonym(serial)})
+                self.stats["reconnects"] += 1
                 self._start_session(serial)
                 self._ev("reconnect_result", "info", "Main", attempt_id=att,
                          props={"outcome": "success"})
@@ -2143,6 +2284,7 @@ class PhoneMirrorApp:
                 except Exception:  # noqa: BLE001
                     pass
         self._ev("session_end", "info", "Main", props={"reason": "user_close"})
+        self.analytics_snapshot("session_end")
         self.save_settings()
         try:
             self.filelog.close()
@@ -2160,18 +2302,14 @@ def main():
     try:
         app = PhoneMirrorApp(root)
     except Exception:  # noqa: BLE001
-        # Startup crash: file me likho + user ko dikhao (silent death se bacho)
+        # Startup crash: crash report file + user ko dikhao (silent death se bacho)
         tb = traceback.format_exc()
-        try:
-            crash_dir = os.path.join(default_base_dir(), "logs")
-            os.makedirs(crash_dir, exist_ok=True)
-            with open(os.path.join(crash_dir, "startup-crash.log"), "a", encoding="utf-8") as f:
-                f.write("%s\n%s\n\n" % (utc_now(), tb))
-        except Exception:  # noqa: BLE001
-            pass
+        path = write_crash_report("StartupError", "app init fail", tb,
+                                  {"phase": "PhoneMirrorApp.__init__"})
         try:
             messagebox.showerror("PhoneMirror start nahi ho paya",
-                                 "Startup error:\n\n%s" % tb[-1200:])
+                                 "Startup error:\n\n%s%s"
+                                 % (tb[-900:], ("\n\nReport: %s" % path) if path else ""))
         except Exception:  # noqa: BLE001
             pass
         try:
