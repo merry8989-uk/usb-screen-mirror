@@ -56,6 +56,29 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 # --------------------------------------------------------------------------- #
 #  Config persistence (diagnostics on/off yaad rakhne ke liye)
 # --------------------------------------------------------------------------- #
+EXPLORE_APPS = [
+    ("Chronos", "Exact alarms with holiday skipping, world clock, timer presets, lap stopwatch", "https://merry8989-uk.github.io/chronos-clock/"),
+    ("Universal AI Calculator", "Standard, scientific, unit converter, programmer, date tools + 47 calculators", "https://merry8989-uk.github.io/universal-ai-calculator/"),
+    ("ProGallery", "Full-featured gallery: MediaStore indexing, duplicate detection, photo/video editing", "https://github.com/merry8989-uk/pro-gallery-android"),
+    ("Kavach", "Indian-first AI caller ID, smart blocking, call recording, AI call assistant", "https://merry8989-uk.github.io/kavach/"),
+    ("Low Distraction Launcher", "Minimal text-only launcher, no icons, no feeds, no internet access", "https://merry8989-uk.github.io/lowdistraction-launcher/"),
+    ("FloatScript", "Transparent floating teleprompter for Android", "https://github.com/merry8989-uk/floatscript"),
+    ("Camara", "Camera + editor: filters, stickers, beauty tools, teleprompter, image & video editing", "https://merry8989-uk.github.io/camara-app/"),
+    ("Powerbase", "Self-hosted diagnostics client: dashboards, log explorer, crash groups, devices, alerts", "https://merry8989-uk.github.io/powerbase-app/"),
+    ("Local AI Keyboard", "Offline privacy-first keyboard with on-device LLM for writing and corrections", "https://github.com/merry8989-uk/local-ai-keyboard"),
+    ("Arrow Puzzle Advanced", "12,000 guaranteed-solvable arrow puzzles (6,000 Classic + 6,000 Escape)", "https://raw.githubusercontent.com/merry8989-uk/arrow-puzzle-advanced/main/dist/ArrowPuzzleAdvanced-5.11.apk"),
+    ("New Arrow Puzzle", "Offline HTML5 arrow-clearing game, 12,000 verified levels, hard mode from 25", "https://merry8989-uk.github.io/new-arrow-puzzle/"),
+    ("PDF Toolkit", "Merge, split, rotate, watermark, convert, protect PDFs in the browser. No uploads", "https://merry8989-uk.github.io/pdf-toolkit/"),
+    ("Doc Viewer & Editor", "Open, edit, convert, compress, merge docs, images, sheets, PDFs, ebooks", "https://merry8989-uk.github.io/doc-viewer-editor/"),
+    ("Dhoondh", "Multi-tab search engine: AI, images, videos, papers, books, PDF, Drive, Archive", "https://merry8989-uk.github.io/dhoondh/"),
+    ("Pulse", "Social feed for text, photos and video. Single-file static site", "https://merry8989-uk.github.io/pulse-feed/"),
+    ("KaamSetu", "Job vacancy portal with employer posting and admin moderation", "https://merry8989-uk.github.io/kaamsetu-job-portal/"),
+    ("48 Laws of Power", "Hindi notes, mindmap, examples and usage for the 48 laws", "https://merry8989-uk.github.io/48-laws-of-power/"),
+    ("On This Day", "Daily bilingual Hindi + English history briefing, static site", "https://merry8989-uk.github.io/on-this-day/"),
+    ("Sangam", "India-hosted social + video platform on its own stack", "https://github.com/merry8989-uk/sangam"),
+    ("Powerbase Server", "Self-hosted observability: log ingestion, explorer, traces, metrics, alerting", "https://github.com/merry8989-uk/powerbase-server"),
+]
+
 def load_config():
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -1316,6 +1339,20 @@ class PhoneMirrorApp:
                                    background="#2b6cb0", foreground="white")
 
     # ---------------- small helpers ----------------
+
+        # ---- Explore more apps by us -------------------------------------
+        explore = ttk.LabelFrame(self.root, text="Explore more apps by us")
+        explore.pack(fill="x", **pad)
+        ttk.Label(explore, text="Other apps we build. Free, no ads, no accounts.",
+                  foreground="#444").grid(row=0, column=0, columnspan=2, sticky="w", padx=8, pady=(4, 2))
+        for _i, (_name, _tag, _url) in enumerate(EXPLORE_APPS, start=1):
+            ttk.Button(explore, text=_name,
+                       command=lambda u=_url: webbrowser.open(u)).grid(
+                row=_i, column=0, padx=8, pady=2, sticky="w")
+            ttk.Label(explore, text=_tag, foreground="#666").grid(
+                row=_i, column=1, sticky="w", padx=(0, 8))
+        explore.columnconfigure(1, weight=1)
+
     def _on_size(self, _val):
         self.size_lbl.configure(text=str(int(float(self.max_size.get()))))
 
