@@ -29,6 +29,7 @@ import csv
 import json
 import time
 import random
+import secrets
 import hashlib
 import shutil
 import platform
@@ -184,7 +185,8 @@ def utc_now():
 
 
 def _rand_hex(n=16):
-    return "".join(random.choice("0123456789abcdef") for _ in range(n))
+    """n hex characters from the OS CSPRNG — salts and session ids live here."""
+    return secrets.token_hex((n + 1) // 2)[:n]
 
 
 def _platform_enum():
